@@ -5,7 +5,7 @@
 A utility for generating heatmaps of YOLOv5 https://github.com/ultralytics/yolov5 using Layerwise Relevance Propagation (LRP/CRP).
 Pytorch implementation based on: https://github.com/moboehle/Pytorch-LRP
 
-**Install**
+## Install
 
 ```bash
 git clone https://github.com/akarasman/yolo-heatmaps/
@@ -13,7 +13,7 @@ cd yolo-heatmaps
 pip install -r requirements.txt
 ```
 
-**CLI Use Example**
+## CLI Use Example
 
 ```bash
 python3 explain.py --source=data/images/so-and-so.jpg --weights=yolov5s.pt --explain-class='person'
@@ -21,7 +21,7 @@ python3 explain.py --source=data/images/so-and-so.jpg --weights=yolov5s.pt --exp
 
 Run results saved to runs/explain/exp(# of run)
 
-**Arguments**
+## Arguments
 
 ```bash
   # explain.py is built on detect.py module from YOLOv5, lrp options are :

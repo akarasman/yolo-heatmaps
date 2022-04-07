@@ -19,7 +19,7 @@ pip install -r requirements.txt
 python3 explain.py --source=data/images/so-and-so.jpg --weights=yolov5s.pt --explain-class='person'
 ```
 
-_Run results saved to runs/explain/exp... _
+Run results saved to runs/explain/exp(# of run)
 
 **Arguments**
 

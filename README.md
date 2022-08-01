@@ -44,3 +44,17 @@ Run results saved to runs/explain/exp(# of run)
 ```
 
 Current version only supports YOLOv5s-x models.
+
+
+Please cite our paper if you plan on using code from this repository for your work 
+
+```
+@inproceedings{inproceedings,
+author = {Antonakakis, Marios and Zervakis, Michalis},
+year = {2022},
+month = {06},
+pages = {1-6},
+title = {Heatmap-based Explanation of YOLOv5 Object Detection with Layer-wise Relevance Propagation},
+doi = {10.1109/IST55454.2022.9827744}
+}
+```

@@ -50,7 +50,7 @@ Please cite our paper if you plan on using code from this repository for your wo
 
 ```
 @inproceedings{inproceedings,
-author = {Antonakakis, Marios and Zervakis, Michalis},
+author = {Karasmanoglou, Apostolos and Antonakakis, Marios and Zervakis, Michalis},
 year = {2022},
 month = {06},
 pages = {1-6},

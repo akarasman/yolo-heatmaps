@@ -3,7 +3,7 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 from torch.nn import Conv1d, Conv2d, Conv3d
-from lrp.utils import LayerRelevance
+from .utils import LayerRelevance
 
 class LinearRule(object):
 
@@ -290,7 +290,7 @@ class ConvRule(object):
         with torch.no_grad():
             
             # Pre-process : Apply power to weights/input, discard negative activations
-            x = module.in_tensor.clone()
+            x = torch.cat( [module.in_tensor.clone()] * relevance_in.size(0), dim=0)
             w = module.weight.clone()
             if self.positive :
                 x = x.clamp(min=0)
@@ -299,6 +299,7 @@ class ConvRule(object):
             w = w.pow(self.power)
 
             # Compute forward activation with modified weights (step 1)
+            
             z = conv_fwd(x, weight=w, bias=None, stride=module.stride,
                          padding=module.padding, groups=module.groups,) #
             z = z + torch.sign(z) * self.eps

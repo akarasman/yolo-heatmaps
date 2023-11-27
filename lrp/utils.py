@@ -6,7 +6,7 @@ import numpy as np
 
 def flexible_prop(inverse):
 
-    """ Wrapper to help with propagating relevance elegantly """
+    """ Wrapper to help with propagating relevance """
 
     def prop_wrapper(layer, relevance, **kwargs) :
         if isinstance(relevance, LayerRelevance) :
@@ -30,27 +30,6 @@ class Flatten(torch.nn.Module):
     def forward(self, in_tensor):
         return in_tensor.view((in_tensor.size()[0], -1))
 
-def load_data():
-
-    df = datasets.load_data_table_15T()
-
-    # Patient-wise train-test-split.
-    # Select a number of patients for each class, put all their images in the test set
-    # and all other images in the train set. This is the split that is used in the paper to produce the heatmaps.
-    test_patients_per_class = 30
-
-    patients_AD = df[df['DX'] == 'Dementia']['PTID'].unique()
-    patients_CN = df[df['DX'] == 'CN']['PTID'].unique()
-
-    patients_AD_train, patients_AD_test = train_test_split(patients_AD, test_size=test_patients_per_class,
-                                                           random_state=0)
-    patients_CN_train, patients_CN_test = train_test_split(patients_CN, test_size=test_patients_per_class,
-                                                           random_state=0)
-
-    patients_train = np.concatenate([patients_AD_train, patients_CN_train])
-    patients_test = np.concatenate([patients_AD_test, patients_CN_test])
-
-    return datasets.build_datasets(df, patients_train, patients_test, normalize=True)
 
 def scale_mask(mask, shape):
 
@@ -265,6 +244,8 @@ class LayerRelevance(torch.Tensor) :
         """
 
         try:
+            if isinstance(self.tensor, list) :
+                return
             if self.tensor.nelement() != 0 :
                 self.tensor += self.cache[rev_idx]
             else :

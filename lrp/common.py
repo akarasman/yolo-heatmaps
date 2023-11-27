@@ -1,24 +1,19 @@
 import torch
 
 from torch.nn.functional import max_unpool2d, max_pool2d
-from lrp.utils import LayerRelevance
+from .utils import LayerRelevance
 
 def prop_SPPF(*args):
 
     inverter, mod, relevance = args
-
-    #relevance = torch.cat([r.view(mod.m.out_shape) for r in relevance ], dim=0)
-    bs = relevance.size(0)
+    
     relevance = inverter(mod.cv2, relevance)
     msg = relevance.scatter(which=-1)
     ch = msg.size(1) // 4
     
     r3 = msg[:, 3*ch:4*ch, ...] 
-
-    r2 = msg[:, 2*ch:3*ch, ...] + r3
-    
+    r2 = msg[:, 2*ch:3*ch, ...] + r3   
     r1 = msg[:, ch:2*ch, ...] + r2
-
     rx = msg[:, :ch, ...] + r1
     
     msg = inverter(mod.cv1, rx)
@@ -60,7 +55,6 @@ def prop_Concat(*args):
 
     _, mod, relevance = args
 
-    # Because concatenate
     slices = relevance.scatter(-1).split(mod.in_shapes, dim=mod.d)
     relevance.gather([(to, msg) for to, msg in zip(mod.f, slices)])
 
@@ -70,17 +64,14 @@ def prop_Detect(*args):
 
     inverter, mod, relevance = args
     relevance_out = []
-
-    scattered = relevance.scatter()
-    for m, rel in zip(mod.m, scattered[1:]):
-        to, msg = rel
-        msg = torch.cat([msg[..., i] for i in range(msg.size(-1))], dim=1)
-        to = to if to != mod.reg_num else -1
-        out = inverter(m, msg)
-        relevance_out.append((to, out))
+    
+    _, scattered = relevance.scatter()[0]
+    prop_to = [21, 18, 15][::-1]
+    for i, rel in enumerate(scattered):
+        relevance_out.append((prop_to[i], inverter(mod.cv3[i], rel)))
+        inverter(mod.cv3[i], rel)
 
     relevance.gather(relevance_out)
-
     return relevance
 
 
@@ -116,9 +107,35 @@ def prop_Bottleneck(*args):
     ar = mod.cv2.conv.out_tensor.abs()
     ax = mod.cv1.conv.in_tensor.abs()
 
-    relevance = relevance_in #* ar / (ax + ar)
+    relevance = relevance_in
     relevance = inverter(mod.cv1, relevance)
     relevance = inverter(mod.cv2, relevance)
-    relevance = relevance #+ relevance_in * ax / (ax + ar)
 
+    return relevance
+
+
+def prop_C2f(*args):
+    # Extract relevant tensors from the module
+    
+    inverter, mod, relevance = args
+    msg = relevance.scatter(which=-1)
+    msg_cv2 = inverter(mod.cv2, msg)
+    msg_m = list(msg_cv2.chunk(msg_cv2.size(1) // mod.c, 1))
+
+    # Relevance propagation through the bottleneck blocks (m)
+    for i, m_block in enumerate(mod.m[::-1]):
+        msg_m[-(i+2)] += inverter(m_block, msg_m[-(i+1)])
+    msg_cv1 = torch.cat(msg_m[:2], axis=1)
+    msg = inverter(mod.cv1, msg_cv1)
+    relevance.gather([(-1, msg)])
+    return relevance
+
+
+def prop_DFL(*args) :
+    
+    _, _, a = mod.in_shape
+    inverter, mod, relevance = args
+    relevance = inverter(relevance.unsqueeze(0), mod.conv.weight.data).transpose(2, 1)
+    relevance = torch.cat([ relevance[0,:,:,ai].flatten().unsqueeze(-1) for ai in range(a) ], axis=-1).unsqueeze(0)
+    
     return relevance

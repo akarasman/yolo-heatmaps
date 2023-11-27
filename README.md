@@ -1,5 +1,5 @@
 # yolo-heatmaps
-A utility for generating explanatory heatmaps from YOLOv8 () object detection results 
+A utility for generating explanatory heatmaps from YOLOv8 (https://github.com/ultralytics/ultralytics) object detection results 
 using Layerwise Relevance Propagation (LRP/CRP).
 
 ```

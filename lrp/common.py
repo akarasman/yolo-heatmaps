@@ -1,7 +1,9 @@
 import torch
 
 from torch.nn.functional import max_unpool2d, max_pool2d
-from .utils import LayerRelevance
+from .utils import LayerRelevance, get_dummy_summation_conv_layer
+from .inverter_util import conv_nd_fwd_hook
+
 
 def prop_SPPF(*args):
 
@@ -86,6 +88,8 @@ def prop_C3(*args):
     inverter, mod, relevance = args
     msg = relevance.scatter(which=-1)
 
+    msg = inverter(mod.cv3, msg) 
+
     c_ = msg.size(1)
 
     msg_cv1 = msg[:, : (c_ // 2), ...]
@@ -102,16 +106,27 @@ def prop_C3(*args):
 
 def prop_Bottleneck(*args):
 
-    inverter, mod, relevance_in = args
+    inverter, mod, relevance = args
 
-    ar = mod.cv2.conv.out_tensor.abs()
-    ax = mod.cv1.conv.in_tensor.abs()
+    msg = relevance
+    c = msg.shape[1]
+    
+    dummy_conv = get_dummy_summation_conv_layer(c)
+    x = mod.cv1.conv.in_tensor
+    
 
-    relevance = relevance_in
-    relevance = inverter(mod.cv1, relevance)
-    relevance = inverter(mod.cv2, relevance)
-
-    return relevance
+    y = mod.cv2.conv.out_tensor + mod.cv1.conv.in_tensor
+    xy = torch.concatenate((x,y), dim=1)
+    conv_nd_fwd_hook(dummy_conv, [xy], (x+y))
+    
+    msg = inverter(dummy_conv, msg)
+    msg_in = msg[:, :c, ...]
+    msg_res = msg[:, c:, ...]
+    msg_res = inverter(mod.cv1, msg_res)
+    msg_res = inverter(mod.cv2, msg_res)
+    msg = msg_in + msg_res
+    
+    return msg
 
 
 def prop_C2f(*args):

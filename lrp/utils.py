@@ -51,6 +51,21 @@ def scale_mask(mask, shape):
 
     return nmm_map
 
+def get_dummy_summation_conv_layer(out_channels):
+
+    in_channels = 2 * out_channels
+    
+    conv = torch.nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=False)
+    weight = torch.zeros((out_channels, in_channels, 1, 1))
+    
+    for c in range(out_channels):
+        weight[c, c, 0, 0] = 1.0
+        weight[c, out_channels + c, 0, 0] = 1.0
+    
+    conv.weight = torch.nn.Parameter(weight)
+    
+    return conv
+
 class LayerRelevance(torch.Tensor) :
 
     """

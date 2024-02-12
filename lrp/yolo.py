@@ -331,12 +331,14 @@ class YOLOv8LRP(torch.nn.Module):
                 relevance.pop_cache(layer.reg_num)
                 self.r_values.append(relevance)
                 relevance = self.inverter(layer, relevance)
+                # print(relevance)
 
             if self.save_r_values :
                 self.r_values.append(relevance.snapshot())
             
             if self.device == "cuda":
                 torch.cuda.empty_cache()
+            
             
             lrp_out = relevance.scatter(-1)
 
@@ -345,10 +347,10 @@ class YOLOv8LRP(torch.nn.Module):
                 lrp_d = lrp_out[[1]]
                 top_5_percent_threshold = torch.quantile(lrp_p, 0.98)
                 outlier_mask = lrp_p < top_5_percent_threshold
-                lrp_p = torch.where(outlier_mask, lrp_p, torch.tensor(0.0))
+                lrp_p = torch.where(outlier_mask, lrp_p, torch.tensor(0.0, device=self.device))
                 top_5_percent_threshold = torch.quantile(lrp_p, 0.98)
                 outlier_mask = lrp_d < top_5_percent_threshold
-                lrp_d = torch.where(outlier_mask, lrp_d, torch.tensor(0.0))
+                lrp_d = torch.where(outlier_mask, lrp_d, torch.tensor(0.0, device=self.device))
                 
                 explanation  = (b1*lrp_p - b2*lrp_d).sum(dim=1)[0]
             else :
@@ -356,7 +358,7 @@ class YOLOv8LRP(torch.nn.Module):
                 lrp_p = lrp_p.sum(dim=1)[0]
                 top_5_percent_threshold = torch.quantile(lrp_p, 0.98)
                 outlier_mask = lrp_p < top_5_percent_threshold
-                explanation = torch.where(outlier_mask, lrp_p, torch.tensor(0.0))
+                explanation = torch.where(outlier_mask, lrp_p, torch.tensor(0.0, device=self.device))
                 
                 
             return explanation

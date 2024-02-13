@@ -87,8 +87,7 @@ class YOLOv8LRP(torch.nn.Module):
         # through the layers.
         self.inverter = Inverter(linear_rule=linear_rule,
                                  conv_rule=conv_rule,
-                                 pass_not_implemented=True,
-                                 device=self.device)
+                                 pass_not_implemented=True)
         self.register_new_modules({ conv.Concat : Concat_fwd_hook,
                                     block.SPPF : SPPF_fwd_hook }, 
                                   { block.C3 : prop_C3,
@@ -308,6 +307,8 @@ class YOLOv8LRP(torch.nn.Module):
         
         if isinstance(cls, str):
             cls = list(self.model.names.values()).index(cls)
+
+        self.register_hooks(self.model.model.model)
 
         with torch.no_grad():
     

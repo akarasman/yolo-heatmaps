@@ -98,10 +98,8 @@ class Inverter(torch.nn.Module):
     """
 
     # Implemented rules for relevance propagation.
-    def __init__(self, linear_rule=None, conv_rule=None, pass_not_implemented=False,
-                 device=torch.device('cpu'),):
-
-        self.device = device
+    def __init__(self, linear_rule=None, conv_rule=None, pass_not_implemented=False):
+        
         self.warned_log_softmax = False
         self.linear_rule = linear_rule
         self.conv_rule = conv_rule

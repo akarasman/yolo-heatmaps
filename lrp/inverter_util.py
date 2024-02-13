@@ -31,7 +31,7 @@ def winner_takes_all(relevance_in : torch.Tensor, in_shape : iterable, indices :
     """ 
     # (REAL SLOW, MAKE THIS FASTER !)
     
-    B, C, H, W = relevance_in.size()
+    _, _, H, W = relevance_in.size()
     N = H * W
     relevance_out = []
 

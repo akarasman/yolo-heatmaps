@@ -4,8 +4,8 @@ import pytest
 import torch
 from torch.nn import Conv2d, Linear
 
-from src.lrp.relevance import LayerRelevance, RelevanceMessage
-from src.lrp.rules import (
+from yolo_lrp.lrp.relevance import LayerRelevance, RelevanceMessage
+from yolo_lrp.lrp.rules import (
     RULE_REGISTRY,
     ConvRule,
     LinearRule,

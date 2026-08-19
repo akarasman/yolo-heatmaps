@@ -4,7 +4,7 @@ import pytest
 import torch
 from ultralytics.nn.modules import block, conv
 
-from src.yolo.fwd_hooks import (
+from yolo_lrp.yolo.fwd_hooks import (
     FWD_HOOK_REGISTRY,
     Concat_fwd_hook,
     SPPF_fwd_hook,

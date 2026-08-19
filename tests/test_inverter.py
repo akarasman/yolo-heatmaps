@@ -13,8 +13,8 @@ from torch.nn import (
     Upsample,
 )
 
-from src.lrp.inverter import Inverter
-from src.lrp.rules import ConvRule, LinearRule
+from yolo_lrp.lrp.inverter import Inverter
+from yolo_lrp.lrp.rules import ConvRule, LinearRule
 
 # ---------------------------------------------------------------------------
 # __init__ / rules_by_layer_type

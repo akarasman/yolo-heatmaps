@@ -4,12 +4,12 @@ import pytest
 import torch
 from ultralytics.nn.modules import block, conv, head
 
-from src.lrp.fwd_hooks import _conv_nd_fwd_hook
-from src.lrp.inverter import Inverter
-from src.lrp.relevance import LayerRelevance, RelevanceMessage, scale_key
-from src.lrp.rules import ConvRule
-from src.lrp.utils import get_dummy_summation_conv_layer
-from src.yolo.block_rules import (
+from yolo_lrp.lrp.fwd_hooks import _conv_nd_fwd_hook
+from yolo_lrp.lrp.inverter import Inverter
+from yolo_lrp.lrp.relevance import LayerRelevance, RelevanceMessage, scale_key
+from yolo_lrp.lrp.rules import ConvRule
+from yolo_lrp.lrp.utils import get_dummy_summation_conv_layer
+from yolo_lrp.yolo.block_rules import (
     PROP_REGISTRY,
     _bilinear_relevance,
     _softmax_relevance,

@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from src.lrp.relevance import LayerRelevance, RelevanceMessage, scale_key
+from yolo_lrp.lrp.relevance import LayerRelevance, RelevanceMessage, scale_key
 
 # ---------------------------------------------------------------------------
 # RelevanceMessage

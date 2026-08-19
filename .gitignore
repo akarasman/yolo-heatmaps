@@ -6,3 +6,6 @@ __pycache__/
 *.pt
 .ipynb_checkpoints/
 .coverage
+*.egg-info/
+build/
+dist/

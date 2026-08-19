@@ -1,3 +1,47 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yolo-heatmaps"
+version = "0.1.0"
+description = "LRP/CRP explanatory heatmaps for YOLOv8/YOLOv9/YOLO26/YOLOv10/YOLO11 object detectors"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Apostolos Karasmanoglou" }]
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.0",
+    "torchvision>=0.15",
+    "ultralytics>=8.4",
+    "numpy>=2.0",
+    "matplotlib>=3.8",
+    "pillow>=10.0",
+]
+
+[project.urls]
+Repository = "https://github.com/akarasman/yolo-heatmaps"
+
+[project.scripts]
+yolo-lrp = "yolo_lrp.cli:main"
+
+[project.optional-dependencies]
+# The exact-pinned dev snapshot is requirements-dev.txt (see its own
+# header) - this loose list is for `pip install yolo-heatmaps[dev]`
+# outside this repo, where pinning to versions frozen from one
+# contributor's venv would be actively wrong.
+dev = [
+    "pytest",
+    "pytest-cov",
+    "black",
+    "isort",
+    "flake8",
+    "mypy",
+]
+
+[tool.setuptools.packages.find]
+include = ["yolo_lrp*"]
+
 [tool.black]
 line-length = 88
 
@@ -40,7 +84,7 @@ check_untyped_defs = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "--cov=src --cov-report=term-missing"
+addopts = "--cov=yolo_lrp --cov-report=term-missing"
 markers = [
     "integration: needs real ultralytics + a downloaded YOLO26 checkpoint (network on first run); deselect with -m \"not integration\"",
 ]
@@ -49,4 +93,4 @@ markers = [
 # Branches into subprocesses/threads aren't a concern here - a single
 # straight-line explain() call graph - so plain line coverage is enough;
 # not worth the (real, if small) speed cost of branch coverage.
-source = ["src"]
+source = ["yolo_lrp"]

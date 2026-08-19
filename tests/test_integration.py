@@ -22,10 +22,10 @@ import torch
 
 ultralytics = pytest.importorskip("ultralytics", reason="requires real ultralytics")
 
-from src.lrp.inverter import IDENTITY_MAPPINGS
-from src.lrp.rules import RULE_REGISTRY
-from src.yolo.block_rules import PROP_REGISTRY
-from src.yolo.explainer import YOLOLRP
+from yolo_lrp.lrp.inverter import IDENTITY_MAPPINGS
+from yolo_lrp.lrp.rules import RULE_REGISTRY
+from yolo_lrp.yolo.block_rules import PROP_REGISTRY
+from yolo_lrp.yolo.explainer import YOLOLRP
 
 pytestmark = pytest.mark.integration
 

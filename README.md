@@ -14,17 +14,21 @@ Given a detector and an image, `YOLOLRP` explains *why* the model predicted a gi
 
 ## Installation
 
+Install straight from a checkout:
+
 ```
 py -m venv .venv
 .venv\Scripts\activate
-pip install -r requirements.txt
+pip install .
 ```
 
-`requirements.txt` is the minimal runtime install (what you need to just use `YOLOLRP`/`explain.py`). If you're developing this repo — running the test suite, the notebook, or the formatter/linters — use `requirements-dev.txt` instead, which layers exact-pinned dev tooling (pytest, ipykernel/nbclient, black, isort, flake8, mypy) on top:
+That gives you the `yolo_lrp` package (`import yolo_lrp...`) plus a `yolo-lrp` console script. If you're developing this repo instead — running the test suite, editing the code, using the notebook — install it editable with the dev extras:
 
 ```
-pip install -r requirements-dev.txt
+pip install -e ".[dev]"
 ```
+
+`requirements.txt`/`requirements-dev.txt` still exist alongside `pyproject.toml` for anyone who wants a plain, non-editable dependency install rather than the packaged one; `requirements-dev.txt` in particular is an exact-pinned snapshot of this repo's own working dev venv (see its own header comment) rather than `[project.optional-dependencies].dev`'s loose version ranges.
 
 Weights aren't bundled — the first `YOLO(...)` call downloads the requested checkpoint (e.g. `yolo26n.pt`) automatically via `ultralytics`.
 
@@ -33,16 +37,18 @@ Weights aren't bundled — the first `YOLO(...)` call downloads the requested ch
 ### Command line
 
 ```
-python explain.py riksi.jpg --classes person cat --contrastive
+yolo-lrp riksi.jpg --classes person cat --contrastive
 ```
 
-Writes one heatmap PNG per requested class (plus the raw relevance as `.npy`) to an auto-named output directory. Run `python explain.py --help` for the full list of knobs — model/weights, propagation-rule parameters (`power`/`eps`/`positive`), contrastive weighting, colormap, etc.
+(Working from a checkout without installing? `python explain.py ...` works identically — see "Project layout" below.)
+
+Writes one heatmap PNG per requested class (plus the raw relevance as `.npy`) to an auto-named output directory. Run `yolo-lrp --help` for the full list of knobs — model/weights, propagation-rule parameters (`power`/`eps`/`positive`), contrastive weighting, colormap, etc.
 
 ### Python API
 
 ```python
 from ultralytics import YOLO
-from src.yolo.explainer import YOLOLRP
+from yolo_lrp.yolo.explainer import YOLOLRP
 
 # `image` is a (3, H, W) float tensor, H and W divisible by 32
 yolo = YOLO('yolo26n.pt')
@@ -53,8 +59,6 @@ explanation_crp = lrp.explain(image, cls='person', contrastive=True)
 ```
 
 Don't call `yolo(...)`/`yolo.predict(...)` on the wrapped model directly — that fuses it for standalone inference and breaks the internal structure `YOLOLRP` reads from. Construct `YOLOLRP` from a freshly-loaded model and only ever call it through `YOLOLRP`/`explain()` afterward.
-
-See `example.ipynb` for a full worked example (image loading, LRP and CRP heatmaps, plotting) against a real image.
 
 ## Supported YOLO versions
 
@@ -69,7 +73,7 @@ See `example.ipynb` for a full worked example (image loading, LRP and CRP heatma
 ## Project layout
 
 ```
-src/
+yolo_lrp/
   lrp/            Architecture-independent LRP machinery
     relevance.py    RelevanceMessage / LayerRelevance - the scatter/gather/cache data structures
     rules.py         PropRule (Conv/Linear/MaxPool/Upsample) - Strategy-pattern relevance rules
@@ -80,8 +84,8 @@ src/
     explainer.py     YOLOLRP - the main entry point
     block_rules.py   Relevance rules for YOLO26's composite blocks (C3k2, C2PSA, SPPF, Attention, ...)
     fwd_hooks.py     Forward hooks for YOLO-specific blocks (SPPF, Concat)
-explain.py        CLI (see above)
-example.ipynb     Notebook walkthrough
+  cli.py          yolo-lrp console script's real implementation
+explain.py        Thin shim -> yolo_lrp.cli, for a checkout with nothing installed
 tests/            pytest suite (see below)
 ```
 
@@ -96,12 +100,12 @@ pytest
 
 Everything except `tests/test_integration.py` runs offline against stubbed/synthetic modules. `test_integration.py` (marked `integration`) downloads a real checkpoint per supported YOLO version on first run (see "Supported YOLO versions" above) and exercises the full `explain()` pipeline against each — deselect it with `pytest -m "not integration"` if you want the fast, network-free subset. `pytest` reports coverage automatically (`pyproject.toml`'s `addopts`).
 
-`mypy .` runs in strict mode across `src/` and `explain.py`; `black`, `isort`, and `flake8` are also part of CI (`.github/workflows/ci.yml`) — run them all together with:
+`mypy .` runs in strict mode across `yolo_lrp/` and `explain.py`; `black`, `isort`, and `flake8` are also part of CI (`.github/workflows/ci.yml`), which also does a real `pip install -e .` as an installability smoke test. Run the lint/type checks together with:
 
 ```
-black --check src tests explain.py
-isort --check src tests explain.py
-flake8 src
+black --check yolo_lrp tests explain.py
+isort --check yolo_lrp tests explain.py
+flake8 yolo_lrp
 mypy .
 ```
 

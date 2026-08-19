@@ -1,6 +1,6 @@
 # trunk-ignore(isort)
 from abc import ABC, abstractmethod
-from typing import Dict, Optional, Tuple, Type, Union, cast
+from typing import Any, Callable, Dict, Optional, Tuple, Type, TypeVar, Union, cast
 
 import torch
 import torch.nn.functional as F
@@ -17,6 +17,13 @@ from torch.nn import (
 
 from .protocols import ConvLike, LinearLike, MaxPoolLike, UpsampleLike
 from .relevance import LayerRelevance, RelevanceMessage
+
+# __call__/propagate are type-preserving (LayerRelevance in -> LayerRelevance
+# out, Tensor in -> Tensor out - see propagate's own isinstance branch),
+# same reasoning as Inverter's own RelevanceT in inverter.py. Can't import
+# that one instead: inverter.py imports RULE_REGISTRY/ConvRule/LinearRule/
+# PropRule from this module, so the reverse import would be circular.
+RelevanceT = TypeVar("RelevanceT", LayerRelevance, torch.Tensor)
 
 
 class PropRule(ABC):
@@ -79,12 +86,12 @@ class PropRule(ABC):
         self.positive = positive
         self.contrastive = contrastive
 
-    def __call__(self, module: torch.nn.Module, relevance):
+    def __call__(self, module: torch.nn.Module, relevance: RelevanceT) -> RelevanceT:
         """Wrapper for propagate, makes rule object callable"""
 
         return self.propagate(module, relevance)
 
-    def propagate(self, module: torch.nn.Module, relevance):
+    def propagate(self, module: torch.nn.Module, relevance: RelevanceT) -> RelevanceT:
         """
 
         Propagate incoming relevance through module and redistribute it to lower layers.
@@ -95,13 +102,13 @@ class PropRule(ABC):
         module : torch.nn.Module
             Module through which relevance is propagated.
 
-        relevance : torch.Tensor
+        relevance : LayerRelevance or torch.Tensor
             LayerRelevance tensor or simple tensor containing upper layer relevance.
 
         Returns
         -------
 
-        torch.Tensor
+        LayerRelevance or torch.Tensor
             Re-distributed relevance. If input is tensor output will also
             be tensor, and if it is LayerRelevance output will also be
             LayerRelevance tensor.
@@ -171,12 +178,12 @@ class LinearRule(PropRule):
     http://iphome.hhi.de/samek/pdf/MonXAI19.pdf
     """
 
-    def _get_fwd_step(
-        self,
-    ):
+    def _get_fwd_step(self) -> Callable[..., torch.Tensor]:
         """Dimension non-specific forward function"""
 
-        def linear_wrapper(in_tensor, w, **kwargs):
+        def linear_wrapper(
+            in_tensor: torch.Tensor, w: torch.Tensor, **kwargs: Any
+        ) -> torch.Tensor:
             if self.contrastive:
                 x = torch.cat([in_tensor] * 2, dim=0)
             else:
@@ -185,12 +192,12 @@ class LinearRule(PropRule):
 
         return linear_wrapper
 
-    def _get_bwd_step(
-        self,
-    ):
+    def _get_bwd_step(self) -> Callable[..., torch.Tensor]:
         """Dimension non-specific inverse function"""
 
-        def linear_wrapper(relevance_in, w, **kwargs):
+        def linear_wrapper(
+            relevance_in: torch.Tensor, w: torch.Tensor, **kwargs: Any
+        ) -> torch.Tensor:
             return F.linear(relevance_in, w.t(), **kwargs)
 
         return linear_wrapper
@@ -242,7 +249,9 @@ class ConvRule(PropRule):
     http://iphome.hhi.de/samek/pdf/MonXAI19.pdf
     """
 
-    def _get_fwd_step(self, m):
+    def _get_fwd_step(
+        self, m: Union[Conv1d, Conv2d, Conv3d]
+    ) -> Callable[..., torch.Tensor]:
         """Dimension non-specific forward function"""
 
         try:
@@ -253,7 +262,7 @@ class ConvRule(PropRule):
         # The only function of the following wrapper is to duplicate the input
         # tensor. This is necessary for computing contrastive relevance propagation
         # efficiently.
-        def conv_wrapper(in_tensor, **kwargs):
+        def conv_wrapper(in_tensor: torch.Tensor, **kwargs: Any) -> torch.Tensor:
             if self.contrastive:
                 x = torch.cat([in_tensor, in_tensor], dim=0)
             else:
@@ -262,7 +271,9 @@ class ConvRule(PropRule):
 
         return conv_wrapper
 
-    def _get_bwd_step(self, m):
+    def _get_bwd_step(
+        self, m: Union[Conv1d, Conv2d, Conv3d]
+    ) -> Callable[..., torch.Tensor]:
         """Dimension non-specific inverse function"""
 
         try:
@@ -274,7 +285,7 @@ class ConvRule(PropRule):
         except KeyError:
             raise Exception("Layer must be one of {}".format((Conv1d, Conv2d, Conv3d)))
 
-        def inv_conv_wrapper(relevance_in, **kwargs):
+        def inv_conv_wrapper(relevance_in: torch.Tensor, **kwargs: Any) -> torch.Tensor:
             return inv_conv(relevance_in, **kwargs)
 
         return inv_conv_wrapper
@@ -286,12 +297,17 @@ class ConvRule(PropRule):
         PropRule.compute."""
 
         conv = cast(ConvLike, module)
+        # _get_fwd_step/_get_bwd_step only accept real Conv1d/2d/3d
+        # instances (their own dict dispatches on exact type) - this
+        # rule is only ever registered against those three real types
+        # (see RULE_REGISTRY), never a plain torch.nn.Module.
+        conv_nd = cast(Union[Conv1d, Conv2d, Conv3d], module)
 
         relevance_in = torch.cat(
             [r.view_as(conv.out_tensor) for r in relevance_in], dim=0
         )
-        conv_fwd = self._get_fwd_step(module)
-        conv_bwd = self._get_bwd_step(module)
+        conv_fwd = self._get_fwd_step(conv_nd)
+        conv_bwd = self._get_bwd_step(conv_nd)
 
         with torch.no_grad():
 
@@ -389,44 +405,53 @@ def _winner_takes_all(
     indices: torch.Tensor,
 ) -> torch.Tensor:
     """
-    Implements winner takes-all scheme for re-distibution of relevance
-    for a max pooling layer
+    Implements winner-takes-all redistribution of relevance for a max
+    pooling layer: each pooled output's relevance goes entirely to the
+    input position that was its argmax, accumulated (not overwritten) at
+    positions two or more outputs map to - which happens whenever
+    overlapping windows (stride < kernel_size) share an argmax.
+
+    Vectorized via `scatter_add_` (one accumulate per (batch, channel)
+    row, instead of a Python-level loop over every element).
 
     Arguments
     ---------
 
     relevance_in : torch.Tensor
-        Incoming relevance from upper layers.
+        Incoming relevance from upper layers, shape (B, C, H, W) - the
+        pooled output's own spatial size.
 
     in_shape : Tuple[int, ...]
-        Shape of module input.
+        Shape of module input, (1, C, Hin, Win) as cached by
+        _max_pool_nd_fwd_hook (leading dim always 1 - explain() only
+        ever runs a single-image forward pass; B above may still be
+        larger, e.g. doubled under contrastive relevance).
 
     indices : torch.Tensor
-        Indexes of selected (max) features.
+        argmax indices from F.max_pool2d(..., return_indices=True),
+        shape (B, C, H, W), each value in [0, Hin * Win) - the flat
+        position within its own (Hin, Win) input plane, per PyTorch's
+        own MaxUnpool2d indexing convention.
 
     Returns
     -------
 
     torch.Tensor
-        Relevance redistributed to lower layer.
+        Relevance redistributed to the lower layer, shape (B, C, Hin, Win).
 
     """
-    # (REAL SLOW, MAKE THIS FASTER !)
 
-    _, _, H, W = relevance_in.size()
-    N = H * W
-    relevance_out = []
+    B, C = relevance_in.shape[:2]
+    _, _, Hin, Win = in_shape
 
-    for rin in relevance_in:
-        rout = torch.zeros(in_shape).flatten()
-        relevance_flat = rin.flatten()
+    relevance_out = torch.zeros(
+        B, C, Hin * Win, dtype=relevance_in.dtype, device=relevance_in.device
+    )
+    relevance_out.scatter_add_(
+        2, indices.reshape(B, C, -1), relevance_in.reshape(B, C, -1)
+    )
 
-        for i, idx in enumerate(indices.flatten()):
-            rout[idx + (i // N) * N] += relevance_flat[i]
-
-        relevance_out.append(rout.view(in_shape))
-
-    return torch.cat(relevance_out, dim=0)
+    return relevance_out.view(B, C, Hin, Win)
 
 
 class MaxPoolRule(PropRule):
@@ -444,7 +469,7 @@ class MaxPoolRule(PropRule):
     cached by `_max_pool_nd_fwd_hook`.
     """
 
-    def __init__(self, max: bool = False, **kwargs) -> None:
+    def __init__(self, max: bool = False, **kwargs: Any) -> None:
         """
         Arguments
         ---------

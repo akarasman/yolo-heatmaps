@@ -28,6 +28,9 @@ jobs:
       - name: black --check
         run: black --check src tests explain.py
 
+      - name: isort --check
+        run: isort --check src tests explain.py
+
       - name: flake8
         run: flake8 src
 

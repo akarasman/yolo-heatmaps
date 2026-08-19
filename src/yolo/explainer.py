@@ -183,7 +183,7 @@ class YOLOLRP:
             One entry per detection scale.
         """
 
-        return self.model.model.yaml["head"][-1][0]
+        return cast(List[int], self.model.model.yaml["head"][-1][0])
 
     def to(self, device: Union[str, torch.device]) -> "YOLOLRP":
         """
@@ -756,7 +756,7 @@ class YOLOLRP:
             Model output tensor.
         """
 
-        return self.model(in_tensor)
+        return cast(torch.Tensor, self.model(in_tensor))
 
     def extra_repr(self) -> str:
         """
@@ -775,7 +775,7 @@ class YOLOLRP:
             The wrapped model's extra_repr() output.
         """
 
-        return self.model.extra_repr()
+        return cast(str, self.model.extra_repr())
 
 
 def _initialize_relevance(

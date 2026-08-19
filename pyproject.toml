@@ -1,18 +1,52 @@
 [tool.black]
 line-length = 88
 
+[tool.isort]
+profile = "black"
+
 [tool.mypy]
+strict = true
 
 [[tool.mypy.overrides]]
 # Neither ships type stubs or a py.typed marker, so mypy can't check
 # against their real signatures - without this it reports every call
 # into them as "missing library stubs" noise on top of the real errors.
+# follow_imports = "skip": under strict mode's no_implicit_reexport,
+# mypy otherwise falls back to reading their real source and complains
+# that e.g. ultralytics.nn.modules.block "does not explicitly export"
+# Conv (re-exported from .conv without an explicit `as` alias, which
+# neither library bothers with) - skipping makes every attribute of
+# either package a plain Any, sidestepping that noise the same way
+# ignore_missing_imports already does for the "no stubs" case.
 module = ["torchvision.*", "ultralytics.*"]
 ignore_missing_imports = true
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+# Test functions don't need full annotations under strict mode - typing
+# every `def test_foo():`/fixture is noise pytest's own conventions
+# don't expect. check_untyped_defs off too: these tests lean heavily on
+# lightweight SimpleNamespace/lambda stand-ins for real Module/Inverter
+# instances (duck-typed test doubles, not production call sites), which
+# strict mode would otherwise flag by inspecting even these unannotated
+# bodies. Checks that catch real bugs regardless of annotations (no-any-
+# return, redundant-cast, etc.) still apply.
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+check_untyped_defs = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "--cov=src --cov-report=term-missing"
 markers = [
     "integration: needs real ultralytics + a downloaded YOLO26 checkpoint (network on first run); deselect with -m \"not integration\"",
 ]
+
+[tool.coverage.run]
+# Branches into subprocesses/threads aren't a concern here - a single
+# straight-line explain() call graph - so plain line coverage is enough;
+# not worth the (real, if small) speed cost of branch coverage.
+source = ["src"]

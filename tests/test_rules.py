@@ -172,6 +172,35 @@ def test_maxpool_rule_winner_takes_all_routes_relevance_to_the_argmax_and_conser
     assert flat[[0, 2, 3]].sum().item() == pytest.approx(0.0)
 
 
+def test_maxpool_rule_winner_takes_all_indexes_each_channel_independently():
+    # Real spatial downsampling (4x4 -> 2x2, unlike the single-output
+    # degenerate case above) across 2 channels - catches indexing that
+    # accidentally uses the *output* plane size as each channel's stride
+    # into the (larger) input-shaped result instead of the input plane
+    # size, which the single-channel/single-output case above can't (its
+    # input and output plane sizes coincide at 1, and there's only one
+    # channel to misalign against).
+    torch.manual_seed(0)
+    x = torch.rand(1, 2, 4, 4)
+    out, indices = torch.nn.functional.max_pool2d(
+        x, kernel_size=2, stride=2, return_indices=True
+    )
+    module = SimpleNamespace(out_shape=out.shape, in_shape=x.shape, indices=indices)
+    rule = MaxPoolRule(max=True)
+
+    relevance_in = torch.rand(1, 2, 2, 2)
+    result = rule.compute(module, relevance_in)
+
+    assert result.shape == x.shape
+    assert torch.allclose(result.sum(), relevance_in.sum())
+    # Every unit of relevance should land exactly on its channel's own
+    # argmax positions - nothing bleeds into the other channel.
+    for c in range(2):
+        expected = torch.zeros(4, 4).flatten()
+        expected.scatter_add_(0, indices[0, c].flatten(), relevance_in[0, c].flatten())
+        assert torch.allclose(result[0, c].flatten(), expected)
+
+
 # ---------------------------------------------------------------------------
 # UpsampleRule
 # ---------------------------------------------------------------------------

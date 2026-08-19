@@ -58,17 +58,13 @@ See `example.ipynb` for a full worked example (image loading, LRP and CRP heatma
 
 ## Supported YOLO versions
 
-| Version | Checkpoint tested | Support |
-|---|---|---|
-| YOLOv8 | `yolov8n.pt` | Full — no version-specific code needed |
-| YOLOv9 | `yolov9t.pt` | Full — needed `AConv`/`RepNCSPELAN4`/`ELAN1`/`SPPELAN`/`RepCSP`/`RepBottleneck`/`RepConv` rules |
-| YOLO26 | `yolo26n.pt` | Full — primary target, everything else is ported against it |
-| YOLOv10 | `yolov10n.pt` | Full — needed `SCDown`/`PSA`/`CIB`/`RepVGGDW`/`v10Detect` rules |
-| YOLO11 | `yolo11n.pt` | Full — no version-specific code needed |
-
-All five are exercised end-to-end (every `explain()` mode, plus a check that every module type the real checkpoint contains has a registered rule) by `tests/test_integration.py`, parametrized across all five checkpoints. YOLOv8/YOLO11 needed no new code because their block vocabularies are strict subsets of what YOLO26/YOLOv10 already registered; YOLOv9/YOLOv10 each needed real new propagation rules for their version-specific blocks, registered in `block_rules.PROP_REGISTRY` alongside YOLO26's own.
-
-A different, untested version whose block types are a straightforward registry swap doesn't need a new `YOLOLRP` subclass at all — see "Project layout" below. One with genuinely new block types needs new rules added to `PROP_REGISTRY`/`FWD_HOOK_REGISTRY`, following the pattern of the YOLOv9/YOLOv10 rules already there.
+| Version | Checkpoint tested |
+|---|---|
+| YOLOv8 | `yolov8n.pt` |
+| YOLOv9 | `yolov9t.pt` |
+| YOLO26 | `yolo26n.pt` |
+| YOLOv10 | `yolov10n.pt` |
+| YOLO11 | `yolo11n.pt` |
 
 ## Project layout
 
@@ -98,7 +94,16 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Everything except `tests/test_integration.py` runs offline against stubbed/synthetic modules. `test_integration.py` (marked `integration`) downloads a real checkpoint per supported YOLO version on first run (see "Supported YOLO versions" above) and exercises the full `explain()` pipeline against each — deselect it with `pytest -m "not integration"` if you want the fast, network-free subset.
+Everything except `tests/test_integration.py` runs offline against stubbed/synthetic modules. `test_integration.py` (marked `integration`) downloads a real checkpoint per supported YOLO version on first run (see "Supported YOLO versions" above) and exercises the full `explain()` pipeline against each — deselect it with `pytest -m "not integration"` if you want the fast, network-free subset. `pytest` reports coverage automatically (`pyproject.toml`'s `addopts`).
+
+`mypy .` runs in strict mode across `src/` and `explain.py`; `black`, `isort`, and `flake8` are also part of CI (`.github/workflows/ci.yml`) — run them all together with:
+
+```
+black --check src tests explain.py
+isort --check src tests explain.py
+flake8 src
+mypy .
+```
 
 ## Notes on the LRP rules
 
@@ -120,3 +125,7 @@ If you are planning to utilize this repo in your research kindly cite the follow
   doi={10.1109/IST55454.2022.9827744}
 }
 ```
+
+## License
+
+[MIT](LICENSE)

@@ -1,6 +1,7 @@
 # trunk-ignore(black-py)
 import logging
 from typing import (
+    Any,
     Callable,
     Dict,
     Iterable,
@@ -209,7 +210,7 @@ class Inverter:
         self.inv_funcs[module] = inv_func
 
     def invert(
-        self, layer: torch.nn.Module, relevance: RelevanceT, **kwargs
+        self, layer: torch.nn.Module, relevance: RelevanceT, **kwargs: Any
     ) -> RelevanceT:
         """
         Computes the backward pass for the incoming relevance for the
@@ -279,7 +280,7 @@ class Inverter:
         )
 
     def __call__(
-        self, layer: torch.nn.Module, relevance: RelevanceT, **kwargs
+        self, layer: torch.nn.Module, relevance: RelevanceT, **kwargs: Any
     ) -> RelevanceT:
         """Wrapper for invert method"""
         return self.invert(layer, relevance, **kwargs)

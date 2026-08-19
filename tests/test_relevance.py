@@ -15,6 +15,8 @@ def test_relevance_message_accepts_a_tensor():
 
 def test_relevance_message_rejects_non_tensor_payloads():
     with pytest.raises(TypeError):
+        # Deliberately wrong at both the type-checker and runtime level -
+        # this is exactly what the test verifies gets rejected.
         RelevanceMessage(from_=None, to=-1, relevance=[torch.ones(2, 2)])
 
 

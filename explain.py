@@ -15,7 +15,7 @@ Example
 import argparse
 import datetime as dt
 from pathlib import Path
-from typing import Optional, Sequence, Union
+from typing import Optional, Sequence, Union, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -194,7 +194,7 @@ def load_image(path: Path, size: Sequence[int]) -> torch.Tensor:
             torchvision.transforms.ToTensor(),
         ]
     )
-    return transform(image).float()
+    return cast(torch.Tensor, transform(image).float())
 
 
 def resolve_class(raw: str) -> Union[int, str]:

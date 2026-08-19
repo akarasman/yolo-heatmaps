@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Callable, Dict, Optional, Type, Union, cast
+from typing import TYPE_CHECKING, Callable, Dict, Optional, Tuple, Type, Union, cast
 
 import torch
 from ultralytics.nn.modules import block, conv, head
@@ -84,7 +84,7 @@ def _split_additive_relevance(
     a: torch.Tensor,
     b: torch.Tensor,
     relevance: torch.Tensor,
-):
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Splits relevance for `a + b` back into relevance for `a` and relevance
     for `b`, via the dummy-summation-conv trick used throughout this
@@ -629,7 +629,7 @@ def _bilinear_relevance(
     relevance_z: torch.Tensor,
     z: Optional[torch.Tensor] = None,
     eps: float = _ATTN_EPS,
-):
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Splits relevance for a batched matrix product `z = P @ Q` back into
     relevance for each factor, via the AttnLRP-style bilinear rule
@@ -794,9 +794,14 @@ def prop_Attention(
     N = H * W
     num_heads, key_dim, head_dim = attn.num_heads, attn.key_dim, attn.head_dim
 
-    q, k, v = qkv.view(B, num_heads, key_dim * 2 + head_dim, N).split(
+    # torch.Tensor.split's real implementation is a plain, unannotated
+    # Python method (see torch/_tensor.py) - genuinely untyped, not just
+    # unstubbed, so mypy can't infer its return type; the ignore is for
+    # the call itself, the cast for what it actually returns.
+    qkv_split = qkv.view(B, num_heads, key_dim * 2 + head_dim, N).split(
         [key_dim, key_dim, head_dim], dim=2
-    )
+    )  # type: ignore[no-untyped-call]
+    q, k, v = cast(Tuple[torch.Tensor, torch.Tensor, torch.Tensor], qkv_split)
     q_scaled = q * attn.scale
     scores = q_scaled.transpose(-2, -1) @ k
     attn_weights = scores.softmax(dim=-1)

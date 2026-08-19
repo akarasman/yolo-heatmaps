@@ -139,14 +139,16 @@ def test_invert_recurses_through_sequential_in_reverse_order():
     class _Second(torch.nn.Module):
         pass
 
-    inverter.register_inv_func(
-        _First,
-        lambda inv, layer, relevance: call_order.append("first") or relevance,
-    )
-    inverter.register_inv_func(
-        _Second,
-        lambda inv, layer, relevance: call_order.append("second") or relevance,
-    )
+    def _record_first(inv, layer, relevance):
+        call_order.append("first")
+        return relevance
+
+    def _record_second(inv, layer, relevance):
+        call_order.append("second")
+        return relevance
+
+    inverter.register_inv_func(_First, _record_first)
+    inverter.register_inv_func(_Second, _record_second)
 
     seq = torch.nn.Sequential(_First(), _Second())
     inverter.invert(seq, torch.tensor([1.0]))

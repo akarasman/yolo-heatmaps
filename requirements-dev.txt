@@ -6,7 +6,10 @@
 #
 #   pip freeze | grep -vFf requirements.txt > requirements-dev.txt
 #
-# then re-add this header and the `-r requirements.txt` line by hand.
+# then re-add this header, the `-r requirements.txt` line, and pywin32's
+# `; sys_platform == "win32"` marker (CI installs this file on Linux too
+# - pywin32 has no Linux wheel and would otherwise break that install)
+# by hand.
 -r requirements.txt
 
 anyio==4.14.2
@@ -74,7 +77,7 @@ pyparsing==3.3.2
 pytest==9.1.1
 python-dateutil==2.9.0.post0
 pytokens==0.4.1
-pywin32==312
+pywin32==312; sys_platform == "win32"
 PyYAML==6.0.3
 pyzmq==27.1.0
 referencing==0.37.0

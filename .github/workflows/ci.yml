@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: black --check
+        run: black --check src tests explain.py
+
+      - name: flake8
+        run: flake8 src
+
+      - name: mypy
+        run: mypy .
+
+      - name: Cache downloaded checkpoints
+        uses: actions/cache@v4
+        with:
+          path: "*.pt"
+          key: yolo-checkpoints-v1
+
+      - name: pytest (unit + integration)
+        # Integration tests download one real checkpoint per supported
+        # YOLO version on first run (see README's "Supported YOLO
+        # versions") - cached above so only the first run per cache key
+        # pays for it. Deselect with `-m "not integration"` locally if
+        # you want the fast, network-free subset.
+        run: pytest

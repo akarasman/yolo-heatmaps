@@ -1,0 +1,6 @@
+torch>=2.0
+torchvision>=0.15
+ultralytics>=8.4
+numpy>=2.0
+matplotlib>=3.8
+pillow>=10.0

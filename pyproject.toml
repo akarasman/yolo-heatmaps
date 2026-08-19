@@ -1,0 +1,18 @@
+[tool.black]
+line-length = 88
+
+[tool.mypy]
+
+[[tool.mypy.overrides]]
+# Neither ships type stubs or a py.typed marker, so mypy can't check
+# against their real signatures - without this it reports every call
+# into them as "missing library stubs" noise on top of the real errors.
+module = ["torchvision.*", "ultralytics.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "integration: needs real ultralytics + a downloaded YOLO26 checkpoint (network on first run); deselect with -m \"not integration\"",
+]

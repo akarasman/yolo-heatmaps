@@ -1,0 +1,6 @@
+[flake8]
+max-line-length = 88
+# E203 (whitespace before ':') fires on black's own slice formatting
+# (e.g. `x[1 :]`) - black and flake8 disagree here by design; ignoring
+# E203 when using black is black's own documented recommendation.
+extend-ignore = E203

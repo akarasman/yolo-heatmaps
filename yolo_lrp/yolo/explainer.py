@@ -2,6 +2,8 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple, Type, Union, cast
 
 import torch
+import torch.nn.functional as F
+from ultralytics.utils.nms import non_max_suppression
 
 from ..lrp.fwd_hooks import DEFAULT_FWD_HOOKS, FwdHookFunc, _silent_pass
 from ..lrp.inverter import Inverter
@@ -12,37 +14,32 @@ from .fwd_hooks import FWD_HOOK_REGISTRY
 
 logger = logging.getLogger(__name__)
 
+# Background grid cells have every class at float noise (~1e-7), not
+# truly zero - without this floor, max_class_only's argmax would still
+# "win" there by a meaningless margin.
+_MAX_CLASS_ONLY_FLOOR = 0.01
+
 
 class YOLOLRP:
     """
-    Generate layerwise relevance propagation per-pixel explanation for
-    classification result of a PyTorch Ultralytics YOLO model.
-
+    LRP/CRP explainer for an ultralytics YOLO detector
     (https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0130140).
 
-    This wraps an ultralytics `YOLO` model rather than being one itself: it owns no
-    parameters of its own, only a reference to the wrapped model plus the LRP
-    bookkeeping (registered propagation rules, forward hooks, cached relevance).
-    See each method's own docstring for the actual public/private API surface.
+    Wraps a YOLO model rather than being one - owns no parameters, just
+    the wrapped model plus LRP bookkeeping. Generic across YOLO versions:
+    block-to-rule mappings come from `prop_registry`/`fwd_hook_registry`
+    (default: YOLO26's own), and the structural assumptions about the
+    detection head are isolated in `_get_prop_to`/`_get_cls_preds` for
+    overriding.
 
-    Generic across Ultralytics YOLO versions, not tied to one architecture:
-    which block types map to which propagation/hook functions is injected
-    via `prop_registry`/`fwd_hook_registry` (defaulting to YOLO26's own -
-    see `block_rules.PROP_REGISTRY`/`fwd_hooks.FWD_HOOK_REGISTRY`) rather
-    than hardcoded here, and the few genuinely structural assumptions about
-    the detection head (`_get_prop_to`, `_get_cls_preds`) are broken out
-    into their own overridable methods rather than inlined. A different
-    version whose registry is a straightforward data swap doesn't need a
-    subclass at all - just construct with different registries. One is
-    only worth writing if a version's head is structurally different
-    enough that `_get_prop_to`/`_get_cls_preds` need real overriding, not
-    just different registry data.
+    Diverges from the YOLO-specific CRP formulation `_initialize_relevance`
+    follows in two ways: no object-confidence weighting (modern YOLO heads
+    have no separate objectness score), and it adds its own extra levers
+    (`seed_strategy`, `seed_dilate`, `_MAX_CLASS_ONLY_FLOOR`) the
+    formulation doesn't have.
 
-    ATTENTION:
-        Currently, generating heatmaps for a network only works if all
-        layers that have to be inverted are specified explicitly
-        and registered as a module. If for example,
-        the functional max_poolnd is used, the inversion will not work.
+    ATTENTION: every layer needing inversion must be a registered module -
+    a functional op used directly (e.g. `F.max_pool2d`) won't be caught.
     """
 
     def __init__(
@@ -57,45 +54,33 @@ class YOLOLRP:
         device: torch.device = torch.device("cpu"),
     ) -> None:
         """
-        Constructs the LRP explainer around an already-loaded ultralytics
-        YOLO model, building the conv/linear propagation rules and
-        registering the forward hooks and relevance-propagation functions
-        for every module type `prop_registry`/`fwd_hook_registry` cover.
+        Builds the propagation rules and registers forward hooks +
+        relevance rules for every module type the registries cover.
 
         Arguments
         ---------
 
         model : Any
-            ultralytics YOLO model to wrap and explain (untyped: ultralytics
-            ships no type stubs). `model.model.model` must be the underlying
-            nn.Sequential of layers.
+            Ultralytics YOLO wrapper (untyped - no stubs); `model.model.model`
+            must be the underlying nn.Sequential.
 
         prop_registry : dict, optional
-            Module type -> backward relevance-propagation function. Defaults
-            to YOLO26's own registry (`block_rules.PROP_REGISTRY`). Pass a
-            different registry to target a different YOLO version whose
-            block types are otherwise a drop-in data swap.
+            Module type -> propagation function. Defaults to YOLO26's own.
 
         fwd_hook_registry : dict, optional
-            Module type -> forward hook function. Defaults to YOLO26's own
-            registry (`fwd_hooks.FWD_HOOK_REGISTRY`).
+            Module type -> forward hook function. Defaults to YOLO26's own.
 
         contrastive : bool
-            Initial contrastive setting for the conv/linear propagation
-            rules. Each `explain()` call overrides this with its own
-            `contrastive` argument before propagating, so this only matters
-            if the rules are ever used before the first `explain()` call.
+            Initial contrastive setting for the propagation rules.
 
         power : int
             Exponent applied to inputs/weights by the propagation rules.
 
         positive : bool
-            Whether the propagation rules truncate negative activations to
-            zero.
+            Whether to truncate negative activations to zero.
 
         eps : float
-            Small constant added to denominators in the propagation rules
-            to avoid division by zero.
+            Stabilizing epsilon for the propagation rules.
 
         device : torch.device
             Initial device for the wrapped model and propagator state.
@@ -106,13 +91,12 @@ class YOLOLRP:
             None
         """
 
-        # `model` is an ultralytics.YOLO wrapper; ultralytics ships no type
-        # stubs, so it's typed as Any rather than torch.nn.Module (its
-        # `.model.model` is the actual nn.Sequential of layers).
         self.model = model
         self.device = device
         self.prediction: Optional[torch.Tensor] = None
-        self.r_values: Optional[List[Any]] = None
+        self.r_values: Optional[
+            List[Tuple[Optional[torch.nn.Module], torch.Tensor]]
+        ] = None
 
         conv_rule = ConvRule(
             power=power, positive=positive, eps=eps, contrastive=contrastive
@@ -120,32 +104,23 @@ class YOLOLRP:
         linear_rule = LinearRule(
             power=power, positive=positive, eps=eps, contrastive=contrastive
         )
+        # Off by default - real per-layer snapshotting isn't free.
         self.save_r_values = False
 
-        # Initialize the 'Relevance Propagator' with the chosen rule.
-        # This will be used to back-propagate the relevance values
-        # through the layers.
         self.inverter = Inverter(
             linear_rule=linear_rule,
             conv_rule=conv_rule,
             pass_not_implemented=True,
         )
 
-        # Detect's `from` indices (which head-branch layer numbers its cv3
-        # heads propagate back to). Overridable - see _get_prop_to - since
-        # this assumes an Ultralytics-parsed-yaml-config-shaped model.
+        # Detect's cv3 heads propagate back to these layer indices -
+        # overridable via _get_prop_to for a differently-shaped head.
         self.inverter.prop_to = self._get_prop_to()
 
         self._register_inv_funcs(
             prop_registry if prop_registry is not None else PROP_REGISTRY
         )
 
-        # Forward-hook lookup table for this instance: block-specific
-        # overrides (YOLO-version-specific, injectable) merged over the
-        # architecture-independent primitive defaults. Owned here, not by
-        # Inverter - attaching forward hooks to the live model is a
-        # YOLOLRP concern, and Inverter's own job (invert()) never reads
-        # this table.
         self._fwd_hooks: Dict[Type[torch.nn.Module], FwdHookFunc] = {
             **DEFAULT_FWD_HOOKS,
             **(
@@ -155,7 +130,6 @@ class YOLOLRP:
             ),
         }
 
-        # Parsing the individual model layers
         self._hook_handles: List[Any] = []
         self.module_list: List[torch.nn.Module] = []
         self._attach_forward_hooks(self.model.model.model)
@@ -163,13 +137,9 @@ class YOLOLRP:
 
     def _get_prop_to(self) -> List[int]:
         """
-        Returns the layer indices Detect's cv3 heads propagate relevance
-        back to. Default reads them from the model's own parsed Ultralytics
-        config instead of a hardcoded magic list, so it keeps working if
-        Ultralytics reorders these layers within a version (YOLO26: [16,
-        19, 22]; the old YOLOv8 architecture this library used to target
-        had [15, 18, 21] here instead). Override for a version whose model
-        object doesn't expose the same `model.model.yaml["head"]` shape.
+        Layer indices Detect's cv3 heads propagate relevance back to,
+        read from the model's own parsed config. Override for a
+        differently-shaped head.
 
         Arguments
         ---------
@@ -187,19 +157,19 @@ class YOLOLRP:
 
     def to(self, device: Union[str, torch.device]) -> "YOLOLRP":
         """
-        Move the wrapped model and propagator state to the given device.
+        Moves the wrapped model and propagator state to `device`.
 
         Arguments
         ---------
 
         device : str or torch.device
-            Device to move to, e.g. "cuda", "cuda:1", "cpu", or a torch.device.
+            Device to move to.
 
         Returns
         -------
 
-            YOLOLRP
-                self, for chaining.
+        YOLOLRP
+            self, for chaining.
         """
 
         device = torch.device(device) if isinstance(device, str) else device
@@ -209,9 +179,8 @@ class YOLOLRP:
 
     def _index_module_list(self, entry_point: torch.nn.Module) -> None:
         """
-        Flattens the model's top-level children into self.module_list,
-        tagging each with its registration number for later backward
-        traversal.
+        Flattens `entry_point`'s children into `self.module_list`,
+        tagging each with its registration number.
 
         Arguments
         ---------
@@ -231,8 +200,7 @@ class YOLOLRP:
 
     def _remove_hooks(self) -> None:
         """
-        Removes any forward/backward hooks previously attached by this
-        instance.
+        Removes hooks previously attached by this instance.
 
         Arguments
         ---------
@@ -251,12 +219,9 @@ class YOLOLRP:
 
     def _attach_forward_hooks(self, parent_module: torch.nn.Module) -> None:
         """
-        Recursively registers the forward hooks that save input and output
-        tensors for later computation of relevance distribution. Hook handles
-        are tracked on `self._hook_handles` so a later `explain()` call can
-        remove and re-attach them via the public torch API, instead of
-        probing torch's private `_forward_hooks` bookkeeping to check for
-        an existing registration.
+        Recursively attaches forward hooks that cache each module's
+        input/output for relevance propagation. ReLU also gets a
+        backward hook clamping negative gradients.
 
         Arguments
         ---------
@@ -279,7 +244,6 @@ class YOLOLRP:
                 mod.register_forward_hook(self._get_fwd_hook(mod))
             )
 
-            # Special case for ReLU layer
             if isinstance(mod, torch.nn.ReLU) or isinstance(
                 mod, torch.nn.modules.activation.ReLU
             ):
@@ -289,10 +253,7 @@ class YOLOLRP:
 
     def _get_fwd_hook(self, mod: torch.nn.Module) -> FwdHookFunc:
         """
-        Looks up the forward hook to attach for `mod` in this instance's
-        merged table (block-specific overrides + primitive defaults - see
-        `self._fwd_hooks` in `__init__`), falling back to a silent no-op
-        for any module type neither covers.
+        Forward hook registered for `mod`'s type, or a no-op if none is.
 
         Arguments
         ---------
@@ -304,8 +265,7 @@ class YOLOLRP:
         -------
 
         FwdHookFunc
-            The registered hook for `type(mod)`, or a no-op hook if none
-            is registered.
+            The registered hook, or a no-op.
         """
 
         return self._fwd_hooks.get(type(mod), _silent_pass)
@@ -314,16 +274,14 @@ class YOLOLRP:
         self, inv_funcs: Optional[Dict[Type[torch.nn.Module], PropFunc]] = None
     ) -> None:
         """
-        Registers, per module type, the backward relevance-propagation
-        function the Inverter should dispatch to for composite YOLO
-        blocks.
+        Registers each module type's backward relevance-propagation
+        function with the inverter.
 
         Arguments
         ---------
 
         inv_funcs : dict, optional
-            Mapping of module type to the function that computes its
-            backward relevance propagation.
+            Module type -> propagation function.
 
         Returns
         -------
@@ -341,21 +299,19 @@ class YOLOLRP:
         grad_out: Tuple[torch.Tensor, ...],
     ) -> Tuple[torch.Tensor, ...]:
         """
-        If there is a negative gradient, change it to zero.
+        Clamps negative input gradients to zero.
 
         Arguments
         ---------
 
         module : torch.nn.Module
-            The ReLU module the hook fired on (unused, required by torch's
-            backward hook signature).
+            Unused (required by torch's hook signature).
 
         grad_in : Tuple[torch.Tensor, ...]
-            Gradient(s) with respect to the module's input.
+            Gradient(s) w.r.t. the module's input.
 
         grad_out : Tuple[torch.Tensor, ...]
-            Gradient(s) with respect to the module's output (unused,
-            required by torch's backward hook signature).
+            Unused (required by torch's hook signature).
 
         Returns
         -------
@@ -371,64 +327,58 @@ class YOLOLRP:
         relevance: torch.Tensor, quantile: float = 0.98
     ) -> torch.Tensor:
         """
-        Zero out the top `1 - quantile` fraction of relevance values (extreme
-        outliers), keeping the rest unchanged.
+        Clips relevance above `quantile` down to that threshold instead
+        of zeroing it - the top values are the model's strongest signal,
+        not noise.
 
         Arguments
         ---------
 
         relevance : torch.Tensor
-            Relevance tensor to suppress outliers in.
+            Relevance tensor to clip.
 
         quantile : float
-            Values at or above this quantile are zeroed out.
+            Values above this quantile are clipped down to it.
 
         Returns
         -------
 
         torch.Tensor
-            The relevance tensor with extreme values zeroed out.
+            The clipped relevance tensor.
         """
 
         threshold = torch.quantile(relevance, quantile)
-        return torch.where(
-            relevance < threshold,
-            relevance,
-            torch.tensor(0.0, device=relevance.device),
-        )
+        return torch.clamp(relevance, max=threshold)
 
     def __call__(self, in_tensor: torch.Tensor) -> torch.Tensor:
         """
-        The explanation wrapper returns the same prediction as the
-        original model, but wraps the model call method in the evaluate
-        method to save the last prediction.
+        Alias for `evaluate`.
 
         Arguments
         ---------
 
         in_tensor : torch.Tensor
-            Model input to pass through the pytorch model.
+            Model input.
 
         Returns
         -------
 
         torch.Tensor
-            Model output
+            Model output.
         """
 
         return self.evaluate(in_tensor)
 
     def evaluate(self, in_tensor: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         """
-        Evaluates the model on a new input. The registered forward hooks
-        will save all the data that is necessary to compute the relevance
-        per neuron per layer.
+        Runs the model forward, populating the forward-hook-cached
+        tensors relevance propagation needs.
 
         Arguments
         ---------
 
         in_tensor : torch.Tensor
-            New input for which to predict an output.
+            New input to predict on.
 
         **kwargs : Any
             Forwarded to the wrapped model's own `__call__`.
@@ -437,15 +387,20 @@ class YOLOLRP:
         -------
 
         torch.Tensor
-            Model prediction
+            Model prediction.
         """
 
         self.prediction = self.model.model(in_tensor.unsqueeze(0), **kwargs)
         return self.prediction
 
-    def get_layer_relevance(self) -> Optional[List[Any]]:
+    def get_layer_relevance(
+        self,
+    ) -> Optional[List[Tuple[Optional[torch.nn.Module], torch.Tensor]]]:
         """
-        Get relevance snapshots per layer in the network.
+        Per-layer relevance snapshots from the last `explain()` call, in
+        backward order, each a real detached clone at that layer's own
+        resolution. Final `(None, ...)` entry is the network's own input.
+        `None` unless `explain()` ran with `save_r_values=True`.
 
         Arguments
         ---------
@@ -455,15 +410,16 @@ class YOLOLRP:
         Returns
         -------
 
-        list
-            list of relevance snapshots
-
+        list of (torch.nn.Module or None, torch.Tensor), optional
+            One (layer, relevance) pair per layer, plus a final
+            (None, relevance) entry for the network's own input.
         """
 
         if self.r_values is None:
             logger.warning(
-                "No relevances have been calculated yet, returning None "
-                "in get_layer_relevance."
+                "No relevance snapshots available, returning None in "
+                "get_layer_relevance - either explain() hasn't been "
+                "called yet, or it was called with save_r_values=False."
             )
         return self.r_values
 
@@ -475,52 +431,76 @@ class YOLOLRP:
         contrastive: bool = False,
         primal_intensity: float = 0.5,
         dual_intensity: float = 0.5,
+        seed_strategy: str = "confidence",
+        seed_threshold: float = 0.25,
+        seed_gamma: float = 0.5,
+        seed_dilate: int = 0,
+        localize_bbox: bool = True,
+        bbox: Optional[Tuple[float, float, float, float]] = None,
     ) -> torch.Tensor:
         """
-        Method for generating an explanatort heatmap for the model with
-        the LRP rule chosen at the initialization of the module.
+        Runs LRP/CRP and returns a 2D relevance map for `cls` (or the
+        winning class, if None) over `frame`.
 
         Arguments
         ---------
 
         frame : torch.Tensor
-            Input frame for which to evaluate the LRP algorithm.
+            Input frame to explain.
 
         cls : int or str, optional
-            Index (or name) of the class for which the relevance distribution
-            is to be analyzed. If None, the 'winning' class is used for
-            indexing.
+            Class to explain, by index or name. None uses the winning class.
 
         max_class_only : bool
-            Forwarded to the relevance initializer; whether to zero out all
-            but the winning class's activations before seeding relevance.
+            Zero out non-winning classes before seeding relevance.
 
         contrastive : bool
-            Whether to compute contrastive (primal vs. dual) relevance
-            instead of plain LRP. This is the single source of truth for
-            contrastive-ness: it's applied to the propagation rules for the
-            duration of this call, overriding whatever they were left at by
-            a previous call or the constructor's own `contrastive` default.
+            Compute contrastive (CRP) relevance instead of plain LRP.
 
         primal_intensity : float
-            Weight applied to the primal (class of interest) relevance when
-            combining primal and dual relevance. Only used if contrastive is True.
+            Weight for primal relevance when combining contrastive output.
 
         dual_intensity : float
-            Weight applied to the dual (contrasted-away) relevance when
-            combining primal and dual relevance. Only used if contrastive is True.
+            Weight for dual relevance when combining contrastive output.
+
+        seed_strategy : str
+            How raw confidence becomes seed weight - "confidence",
+            "binary", or "compressed" (see `_apply_seed_strategy`).
+
+        seed_threshold : float
+            Confidence floor for "binary"/"compressed"; ignored by "confidence".
+
+        seed_gamma : float
+            Compression exponent for "compressed"; ignored otherwise.
+
+        seed_dilate : int
+            Grid cells to grow the seeded region by (see `_dilate_seed`).
+            0 is a no-op.
+
+        localize_bbox : bool
+            Gate relevance to the class's own post-NMS box before
+            propagation (paper eq 7).
+
+        bbox : Tuple[float, float, float, float], optional
+            Explicit box to use instead of auto-detecting one.
 
         Returns
         -------
 
         torch.Tensor
-            2D explanation map of relevance over the input frame.
+            2D explanation map.
         """
 
         self.r_values = None
 
         if isinstance(cls, str):
-            cls = list(self.model.names.values()).index(cls)
+            names = list(self.model.names.values())
+            if cls not in names:
+                raise ValueError(
+                    f"Unknown class {cls!r} - not one of this model's "
+                    f"classes: {names}"
+                )
+            cls = names.index(cls)
 
         self._remove_hooks()
         self._attach_forward_hooks(self.model.model.model)
@@ -532,18 +512,22 @@ class YOLOLRP:
             contrastive,
             primal_intensity,
             dual_intensity,
+            seed_strategy,
+            seed_threshold,
+            seed_gamma,
+            seed_dilate,
+            localize_bbox,
+            bbox,
         )
 
-    def _get_cls_preds(self, frame: torch.Tensor) -> List[torch.Tensor]:
+    def _get_cls_preds(self, frame: torch.Tensor) -> Tuple[List[torch.Tensor], torch.Tensor]:
         """
-        Runs the model forward and returns Detect's per-scale classification
-        predictions - the raw material `_initialize_relevance` seeds
-        relevance from. Default assumes a Detect-style head exposed as
-        `model.model.model[-1].cv3`, one branch per detection scale, each
-        branch's final layer forward-hooked with a cached `.out_tensor`.
-        Override for a version whose head isn't shaped this way (e.g. a
-        different Detect variant, or one that doesn't expose `.cv3` the
-        same way).
+        Runs the model forward, returning per-scale classification
+        confidences plus this frame's post-NMS detections (for
+        `localize_bbox`). NMS runs on the raw output directly via
+        `ultralytics.utils.nms.non_max_suppression`, not through the
+        wrapper's own `.predict()` - that fuses Conv+BatchNorm on first
+        use and would break every hook this class relies on.
 
         Arguments
         ---------
@@ -554,24 +538,21 @@ class YOLOLRP:
         Returns
         -------
 
-        List[torch.Tensor]
-            One classification-branch prediction tensor per detection
-            scale, sigmoid-activated.
+        Tuple[List[torch.Tensor], torch.Tensor]
+            Per-scale classification confidences, and post-NMS
+            detections as one (N, 6) tensor - (x1, y1, x2, y2, conf,
+            cls) per row.
 
         Raises
         ------
 
         RuntimeError
-            If `Detect.cv3` is missing - almost always means the wrapped
-            model was fused for standalone inference (e.g. by a prior
-            `model(...)`/`model.predict(...)` call on the same `YOLO`
-            instance, or the same instance passed to more than one
-            `YOLOLRP`), which replaces `cv3` with None. Construct
-            `YOLOLRP` from a freshly-loaded model that's never been used
-            for a raw predict/call.
+            If Detect.cv3 is missing - the model was fused for
+            standalone inference (e.g. a prior predict()/__call__ on the
+            same instance).
         """
 
-        self.model.model.predict(frame.unsqueeze(0))
+        raw_preds, _ = self.model.model.predict(frame.unsqueeze(0))
         cv3 = self.model.model.model[-1].cv3
         if cv3 is None:
             raise RuntimeError(
@@ -583,7 +564,43 @@ class YOLOLRP:
                 "YOLOLRP from that instance before calling predict/__call__ "
                 "on it directly."
             )
-        return [cv3_branch[-1].out_tensor.sigmoid() for cv3_branch in cv3]
+        cls_preds = [cv3_branch[-1].out_tensor.sigmoid() for cv3_branch in cv3]
+
+        is_end2end = raw_preds.shape[-1] == 6
+        detections = non_max_suppression(raw_preds, conf_thres=0.25, end2end=is_end2end)[0]
+        return cls_preds, detections
+
+    def _resolve_bbox(
+        self, detections: torch.Tensor, cls: Optional[int]
+    ) -> Optional[Tuple[float, float, float, float]]:
+        """
+        Highest-confidence post-NMS box for `cls` in `detections`.
+
+        Arguments
+        ---------
+
+        detections : torch.Tensor
+            Post-NMS detections, (N, 6) - (x1, y1, x2, y2, conf, cls) per row.
+
+        cls : int, optional
+            Class of interest. None always resolves to no box.
+
+        Returns
+        -------
+
+        Tuple[float, float, float, float], optional
+            (x1, y1, x2, y2), or None if not detected.
+        """
+
+        if cls is None or detections.numel() == 0:
+            return None
+
+        matches = detections[detections[:, 5].long() == cls]
+        if matches.shape[0] == 0:
+            return None
+
+        best = matches[matches[:, 4].argmax()]
+        return cast(Tuple[float, float, float, float], tuple(best[:4].tolist()))
 
     def _propagate_relevance(
         self,
@@ -593,31 +610,34 @@ class YOLOLRP:
         contrastive: bool,
         primal_intensity: float,
         dual_intensity: float,
+        seed_strategy: str = "confidence",
+        seed_threshold: float = 0.25,
+        seed_gamma: float = 0.5,
+        seed_dilate: int = 0,
+        localize_bbox: bool = True,
+        bbox: Optional[Tuple[float, float, float, float]] = None,
     ) -> torch.Tensor:
         """
-        Runs the model forward, then the LRP backward pass layer by layer
-        through the (already hook-populated) reversed module list, and
-        combines the resulting per-class relevance into a single explanation
-        map. Caches per-layer relevance snapshots on `self.r_values` as it goes.
+        Runs the LRP backward pass through the reversed module list and
+        combines primal/dual relevance into a final map. Snapshots
+        per-layer relevance onto `self.r_values` if `save_r_values` is set.
 
         Arguments
         ---------
 
         frame : torch.Tensor
-            Input frame for which to evaluate the LRP algorithm.
+            Input frame to explain.
 
         cls : int, optional
-            Index of the class of interest, already resolved from any class
-            name by the caller. If None, the winning class is used.
+            Class of interest, already resolved from any name. None uses
+            the winning class.
 
         max_class_only : bool
-            Forwarded to the relevance initializer.
+            Forwarded to `_initialize_relevance`.
 
         contrastive : bool
-            Whether to propagate contrastive (primal vs. dual) relevance.
-            Applied to the conv/linear propagation rules for this call, so
-            they can't silently disagree with what the rest of the pipeline
-            is doing.
+            Whether to propagate contrastive relevance; also synced onto
+            the shared conv/linear rules.
 
         primal_intensity : float
             Forwarded to `_finalize_relevance`.
@@ -625,22 +645,34 @@ class YOLOLRP:
         dual_intensity : float
             Forwarded to `_finalize_relevance`.
 
+        seed_strategy : str
+            Forwarded to `_initialize_relevance`.
+
+        seed_threshold : float
+            Forwarded to `_initialize_relevance`.
+
+        seed_gamma : float
+            Forwarded to `_initialize_relevance`.
+
+        seed_dilate : int
+            Forwarded to `_initialize_relevance`.
+
+        localize_bbox : bool
+            Whether to resolve and apply a bounding-box gate.
+
+        bbox : Tuple[float, float, float, float], optional
+            Explicit box overriding auto-detection.
+
         Returns
         -------
 
         torch.Tensor
-            2D explanation map of relevance over the input frame.
+            2D explanation map.
         """
 
-        # The conv/linear rules are shared, long-lived objects (built once in
-        # __init__ and referenced by self.inverter), so their contrastive
-        # flag has to be kept in sync with this call's own `contrastive`
-        # argument every time - otherwise a later non-default explain() call
-        # would silently propagate with a stale contrastive setting from
-        # construction time or a previous call.
-        # Inverter itself types these Optional (a bare Inverter can be built
-        # without either), but __init__ above always constructs and passes
-        # both - the asserts document that invariant for readers and mypy.
+        # Shared, long-lived rule objects - keep their contrastive flag
+        # in sync with this call, not a stale one from construction or a
+        # previous call.
         assert self.inverter.conv_rule is not None
         assert self.inverter.linear_rule is not None
         self.inverter.conv_rule.contrastive = contrastive
@@ -648,39 +680,47 @@ class YOLOLRP:
 
         with torch.no_grad():
 
-            # We have to iterate through the model backwards.
             rev_model: List[torch.nn.Module] = self.module_list[::-1]
 
-            cls_preds = self._get_cls_preds(frame)
+            cls_preds, detections = self._get_cls_preds(frame)
+
+            resolved_bbox = bbox
+            if resolved_bbox is None and localize_bbox:
+                resolved_bbox = self._resolve_bbox(detections, cls)
+                if resolved_bbox is None and cls is not None:
+                    logger.warning(
+                        f"localize_bbox=True but class {cls} has no "
+                        "post-NMS detection in this frame - proceeding "
+                        "without spatial localization."
+                    )
+
             relevance: LayerRelevance = _initialize_relevance(
                 cls_preds,
                 cls=cls,
                 max_class_only=max_class_only,
                 contrastive=contrastive,
+                seed_strategy=seed_strategy,
+                seed_threshold=seed_threshold,
+                seed_gamma=seed_gamma,
+                seed_dilate=seed_dilate,
+                bbox=resolved_bbox,
+                image_size=(frame.shape[-2], frame.shape[-1]),
             )
 
-            # List to save relevance distributions per layer
-            self.r_values = [relevance]
+            self.r_values = [] if self.save_r_values else None
             for layer in rev_model:
-                # Compute layer specific backwards-propagation of relevance values
-                # reg_num is set on every layer in module_list by
-                # _index_module_list before this loop ever runs (see
-                # setattr(mod, "reg_num", ...) above) - cast, not getattr
-                # with a fallback, since pop_cache needs a real int here.
                 relevance.pop_cache(cast(int, getattr(layer, "reg_num")))
-                self.r_values.append(relevance)
+                if self.r_values is not None:
+                    # Clone before it's consumed below - LayerRelevance
+                    # mutates its cache in place, so this is a real
+                    # snapshot, not a live reference.
+                    own = relevance.scatter(which=-1, destroy=False)
+                    self.r_values.append((layer, own.detach().clone()))
                 relevance = self.inverter(layer, relevance)
 
-            if self.save_r_values:
-                # LayerRelevance only does scatter/gather, cache, and
-                # print - snapshotting to numpy for debugging is this
-                # (sole) caller's job, reading the cache directly.
-                own = relevance.cache.get(-1)
-                self.r_values.append(
-                    own.relevance.cpu().numpy()
-                    if own is not None
-                    else torch.tensor([]).numpy()
-                )
+            if self.r_values is not None:
+                own_final = relevance.scatter(which=-1, destroy=False)
+                self.r_values.append((None, own_final.detach().clone()))
 
             if self.device.type == "cuda":
                 torch.cuda.empty_cache()
@@ -698,31 +738,23 @@ class YOLOLRP:
         dual_intensity: float,
     ) -> torch.Tensor:
         """
-        Collapses the scattered per-channel relevance for the input layer
-        into a single 2D explanation map. In contrastive mode, the primal
-        (class of interest) and dual (contrasted-away) relevance are each
-        outlier-suppressed before being combined; otherwise the primal
-        relevance is summed across channels first and suppressed after.
+        Collapses per-channel relevance at the input layer into a single 2D map.
 
         Arguments
         ---------
 
         lrp_out : torch.Tensor
-            Scattered relevance at the input layer, batch dim 0 holding the
-            primal relevance and (in contrastive mode) batch dim 1 holding
-            the dual relevance.
+            Scattered relevance at the input layer; batch dim 0 is
+            primal, dim 1 (if contrastive) is dual.
 
         contrastive : bool
-            Whether to combine primal and dual relevance, or just return the
-            (outlier-suppressed) primal relevance on its own.
+            Whether to combine primal and dual relevance.
 
         primal_intensity : float
-            Weight applied to the primal relevance. Only used if contrastive
-            is True.
+            Weight for primal relevance.
 
         dual_intensity : float
-            Weight applied to the dual relevance. Only used if contrastive
-            is True.
+            Weight for dual relevance.
 
         Returns
         -------
@@ -741,27 +773,26 @@ class YOLOLRP:
 
     def forward(self, in_tensor: torch.Tensor) -> torch.Tensor:
         """
-        Evaluates model on a given input tensor.
+        Evaluates the wrapped model on `in_tensor`.
 
         Arguments
         ---------
 
         in_tensor : torch.Tensor
-            Model input tensor.
+            Model input.
 
         Returns
         -------
 
         torch.Tensor
-            Model output tensor.
+            Model output.
         """
 
         return cast(torch.Tensor, self.model(in_tensor))
 
     def extra_repr(self) -> str:
         """
-        Returns the wrapped model's own extra_repr(), for convenient
-        introspection of what's being explained.
+        Wrapped model's own `extra_repr()`.
 
         Arguments
         ---------
@@ -778,49 +809,247 @@ class YOLOLRP:
         return cast(str, self.model.extra_repr())
 
 
+def _apply_seed_strategy(
+    cls_pred: torch.Tensor,
+    strategy: str,
+    threshold: float,
+    gamma: float,
+) -> torch.Tensor:
+    """
+    Reweights raw classification confidence into relevance seed weight -
+    raw confidence is sharply peaked near an object's centroid (YOLO's
+    training only supervises a few central anchors), so seeding with it
+    directly carries that peak through LRP's conservation almost unchanged.
+
+    Arguments
+    ---------
+
+    cls_pred : torch.Tensor
+        Raw sigmoid confidence at one detection scale, all classes present.
+
+    strategy : str
+        "confidence" (raw, unchanged), "binary" (flat 1.0 above
+        `threshold`), or "compressed" (`confidence ** gamma` above
+        `threshold`).
+
+    threshold : float
+        Confidence floor for "binary"/"compressed"; ignored by "confidence".
+
+    gamma : float
+        Compression exponent for "compressed"; ignored otherwise.
+
+    Returns
+    -------
+
+    torch.Tensor
+        Reweighted confidence, same shape as `cls_pred`.
+
+    Raises
+    ------
+
+    ValueError
+        If `strategy` isn't recognized.
+    """
+
+    if strategy == "confidence":
+        return cls_pred
+    elif strategy == "binary":
+        return (cls_pred > threshold).to(cls_pred.dtype)
+    elif strategy == "compressed":
+        return torch.where(
+            cls_pred > threshold,
+            cls_pred.pow(gamma),
+            torch.zeros_like(cls_pred),
+        )
+    else:
+        raise ValueError(
+            f"Unknown seed_strategy {strategy!r} - expected one of "
+            "'confidence', 'binary', 'compressed'."
+        )
+
+
+def _dilate_seed(cls_pred: torch.Tensor, radius: int) -> torch.Tensor:
+    """
+    Grows the seeded region by `radius` grid cells via max-pooling -
+    controls how many locations are active, not how much weight each gets.
+
+    Arguments
+    ---------
+
+    cls_pred : torch.Tensor
+        Seed confidence for one detection scale.
+
+    radius : int
+        Grid cells to grow by in every direction. 0 is a no-op.
+
+    Returns
+    -------
+
+    torch.Tensor
+        Dilated seed confidence, same shape as `cls_pred`.
+    """
+
+    if radius <= 0:
+        return cls_pred
+    return F.max_pool2d(cls_pred, kernel_size=2 * radius + 1, stride=1, padding=radius)
+
+
+def _reduce_to_max_class(cls_pred: torch.Tensor) -> torch.Tensor:
+    """
+    Keeps only the winning class's confidence per location, zeroing the
+    rest (paper eq 6) - only if the winner clears
+    `_MAX_CLASS_ONLY_FLOOR`, since background cells sit at float noise
+    and would otherwise "win" by a meaningless margin.
+
+    Arguments
+    ---------
+
+    cls_pred : torch.Tensor
+        Per-class confidence for one detection scale.
+
+    Returns
+    -------
+
+    torch.Tensor
+        Same shape, non-winning (or sub-floor) classes zeroed.
+    """
+
+    max_class, i = cls_pred.max(dim=1, keepdim=True)
+    max_class = torch.where(
+        max_class > _MAX_CLASS_ONLY_FLOOR, max_class, torch.zeros_like(max_class)
+    )
+    return torch.zeros_like(cls_pred).scatter(1, i, max_class)
+
+
+def _second_best_class(cls_pred: torch.Tensor, cls: int) -> torch.Tensor:
+    """
+    Best *other* class's confidence per location, excluding `cls` (paper
+    eq 10). Computed before `_reduce_to_max_class` runs, so a location
+    where `cls` is the winner still surfaces its real runner-up.
+
+    Arguments
+    ---------
+
+    cls_pred : torch.Tensor
+        Per-class confidence, not yet through `_reduce_to_max_class`.
+
+    cls : int
+        Class to exclude from the search.
+
+    Returns
+    -------
+
+    torch.Tensor
+        Same shape, only the best non-`cls` class survives per location.
+    """
+
+    masked = cls_pred.clone()
+    masked[:, cls] = -1.0  # confidence is always >= 0, so this always loses the max
+    best_other, i = masked.max(dim=1, keepdim=True)
+    best_other = torch.where(
+        best_other > _MAX_CLASS_ONLY_FLOOR, best_other, torch.zeros_like(best_other)
+    )
+    return torch.zeros_like(cls_pred).scatter(1, i, best_other)
+
+
+def _localize_to_bbox(
+    cls_pred: torch.Tensor,
+    bbox: Tuple[float, float, float, float],
+    image_size: Tuple[int, int],
+) -> torch.Tensor:
+    """
+    Zeros every grid cell whose anchor point falls outside `bbox` (paper
+    eq 7) - a stand-in for the cell's decoded box, since this port never
+    reads Detect's box-regression branch.
+
+    Arguments
+    ---------
+
+    cls_pred : torch.Tensor
+        Per-class confidence for one detection scale.
+
+    bbox : Tuple[float, float, float, float]
+        (x1, y1, x2, y2) in the frame's pixel coordinates.
+
+    image_size : Tuple[int, int]
+        (height, width) `bbox` is expressed in.
+
+    Returns
+    -------
+
+    torch.Tensor
+        Same shape, classes zeroed outside `bbox`.
+    """
+
+    _, _, h, w = cls_pred.shape
+    stride_y = image_size[0] / h
+    stride_x = image_size[1] / w
+    x1, y1, x2, y2 = bbox
+
+    ys = (torch.arange(h, dtype=cls_pred.dtype, device=cls_pred.device) + 0.5) * stride_y
+    xs = (torch.arange(w, dtype=cls_pred.dtype, device=cls_pred.device) + 0.5) * stride_x
+    inside = ((ys >= y1) & (ys <= y2))[:, None] & ((xs >= x1) & (xs <= x2))[None, :]
+
+    return cls_pred * inside.to(cls_pred.dtype)
+
+
 def _initialize_relevance(
     cls_preds: List[torch.Tensor],
     cls: Optional[int] = None,
     max_class_only: bool = False,
     contrastive: bool = False,
+    seed_strategy: str = "confidence",
+    seed_threshold: float = 0.25,
+    seed_gamma: float = 0.5,
+    seed_dilate: int = 0,
+    bbox: Optional[Tuple[float, float, float, float]] = None,
+    image_size: Optional[Tuple[int, int]] = None,
 ) -> LayerRelevance:
     """
-    Builds the initial per-scale relevance that `YOLOLRP._propagate_relevance`
-    seeds its backward pass from, out of the raw class-prediction tensors at
-    each detection scale. Private to this module - only used internally by
-    `YOLOLRP`, not part of the library's public API. A plain function,
-    not a class: nothing here is ever reused across multiple calls (a fresh
-    call is made once per `explain()`, with no state carried between calls),
-    so there's nothing a class/`__call__` split would buy over just passing
-    every argument directly.
+    Builds the per-scale seed relevance `_propagate_relevance` starts its
+    backward pass from.
 
     Arguments
     ---------
 
     cls_preds : List[torch.Tensor]
-        One classification-branch prediction tensor per detection scale
-        (Detect's `cv3` outputs, already sigmoid-activated).
+        Per-scale classification confidence (Detect's cv3 outputs,
+        sigmoid-activated).
 
     cls : int, optional
-        Index of the class of interest. If None, all classes contribute
-        (subject to `max_class_only`) and the 'winning' class per location
-        effectively drives the relevance.
+        Class of interest. None: whichever class wins at each location
+        drives relevance.
 
     max_class_only : bool
-        Zero all output activations from classes that are not the max,
-        before any class-of-interest filtering.
+        Gate primal relevance via `_reduce_to_max_class`. Never applied to dual.
 
     contrastive : bool
-        Whether to build a dual (primal vs. contrasted-away) relevance
-        batch instead of a single one. Requires `cls` to be set.
+        Build dual relevance via `_second_best_class` (paper eq 10).
+        Requires `cls`.
+
+    seed_strategy : str
+        Forwarded to `_apply_seed_strategy`.
+
+    seed_threshold : float
+        Forwarded to `_apply_seed_strategy`.
+
+    seed_gamma : float
+        Forwarded to `_apply_seed_strategy`.
+
+    seed_dilate : int
+        Forwarded to `_dilate_seed`.
+
+    bbox : Tuple[float, float, float, float], optional
+        Forwarded to `_localize_to_bbox`. None skips localization.
+
+    image_size : Tuple[int, int], optional
+        Required if `bbox` is given.
 
     Returns
     -------
 
     LayerRelevance
-        Initial relevance, one message per detection scale (keyed via
-        `scale_key` - the scales have differing spatial shapes and can't
-        be merged into a single message).
+        Initial relevance, one message per detection scale.
     """
 
     if contrastive:
@@ -831,26 +1060,32 @@ def _initialize_relevance(
     relevance = LayerRelevance(contrastive=contrastive)
     for j, cls_pred in enumerate(cls_preds):
 
-        # Keep only max class outputs (the rest may be discarded as noise)
-        if max_class_only:
-            max_class, i = cls_pred.max(dim=1, keepdim=True)
-            cls_pred = torch.zeros_like(cls_pred).scatter(1, i, max_class)
+        cls_pred = _apply_seed_strategy(
+            cls_pred, seed_strategy, seed_threshold, seed_gamma
+        )
+        cls_pred = _dilate_seed(cls_pred, seed_dilate)
 
-        # Filter out only class of interest
+        if bbox is not None:
+            assert image_size is not None, "bbox given without image_size"
+            cls_pred = _localize_to_bbox(cls_pred, bbox, image_size)
+
         if cls is None:
+            if max_class_only:
+                cls_pred = _reduce_to_max_class(cls_pred)
             relevance.gather(
                 RelevanceMessage(from_=None, to=scale_key(j), relevance=cls_pred)
             )
             continue
 
-        # Construct dual relevance
-        if contrastive:
-            dual = cls_pred.clone()
-            dual[:, cls] = 0.0
-            cls_pred = torch.cat([cls_pred, dual], dim=0)
-        else:
-            cls_pred[:, :cls] = 0.0
-            cls_pred[:, cls + 1 :] = 0.0
+        # Dual (eq 10) must come from cls_pred before max_class_only
+        # collapses it - see _second_best_class.
+        dual = _second_best_class(cls_pred, cls) if contrastive else None
+
+        primal = _reduce_to_max_class(cls_pred) if max_class_only else cls_pred.clone()
+        primal[:, :cls] = 0.0
+        primal[:, cls + 1 :] = 0.0
+
+        cls_pred = torch.cat([primal, dual], dim=0) if dual is not None else primal
 
         relevance.gather(
             RelevanceMessage(from_=None, to=scale_key(j), relevance=cls_pred)

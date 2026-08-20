@@ -34,10 +34,10 @@ jobs:
           yolo-lrp --help
 
       - name: black --check
-        run: black --check yolo_lrp tests explain.py
+        run: black --check yolo_lrp tests
 
       - name: isort --check
-        run: isort --check yolo_lrp tests explain.py
+        run: isort --check yolo_lrp tests
 
       - name: flake8
         run: flake8 yolo_lrp

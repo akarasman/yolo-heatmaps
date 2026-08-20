@@ -40,7 +40,7 @@ Weights aren't bundled — the first `YOLO(...)` call downloads the requested ch
 yolo-lrp riksi.jpg --classes person cat --contrastive
 ```
 
-(Working from a checkout without installing? `python explain.py ...` works identically — see "Project layout" below.)
+(Working from a checkout without installing? `python -m yolo_lrp.cli ...` works identically.)
 
 Writes one heatmap PNG per requested class (plus the raw relevance as `.npy`) to an auto-named output directory. Run `yolo-lrp --help` for the full list of knobs — model/weights, propagation-rule parameters (`power`/`eps`/`positive`), contrastive weighting, colormap, etc.
 
@@ -85,7 +85,6 @@ yolo_lrp/
     block_rules.py   Relevance rules for YOLO26's composite blocks (C3k2, C2PSA, SPPF, Attention, ...)
     fwd_hooks.py     Forward hooks for YOLO-specific blocks (SPPF, Concat)
   cli.py          yolo-lrp console script's real implementation
-explain.py        Thin shim -> yolo_lrp.cli, for a checkout with nothing installed
 tests/            pytest suite (see below)
 ```
 
@@ -100,11 +99,11 @@ pytest
 
 Everything except `tests/test_integration.py` runs offline against stubbed/synthetic modules. `test_integration.py` (marked `integration`) downloads a real checkpoint per supported YOLO version on first run (see "Supported YOLO versions" above) and exercises the full `explain()` pipeline against each — deselect it with `pytest -m "not integration"` if you want the fast, network-free subset. `pytest` reports coverage automatically (`pyproject.toml`'s `addopts`).
 
-`mypy .` runs in strict mode across `yolo_lrp/` and `explain.py`; `black`, `isort`, and `flake8` are also part of CI (`.github/workflows/ci.yml`), which also does a real `pip install -e .` as an installability smoke test. Run the lint/type checks together with:
+`mypy .` runs in strict mode across `yolo_lrp/`; `black`, `isort`, and `flake8` are also part of CI (`.github/workflows/ci.yml`), which also does a real `pip install -e .` as an installability smoke test. Run the lint/type checks together with:
 
 ```
-black --check yolo_lrp tests explain.py
-isort --check yolo_lrp tests explain.py
+black --check yolo_lrp tests
+isort --check yolo_lrp tests
 flake8 yolo_lrp
 mypy .
 ```

@@ -10,10 +10,10 @@ Installed as the `yolo-lrp` console script (see pyproject.toml's
 Example
 -------
 
-    yolo-lrp riksi.jpg --classes person cat --contrastive
+    yolo-lrp dog_bicycle_truck.jpg --classes dog bicycle --contrastive
 
-    yolo-lrp riksi.jpg --classes person --weights yolo26s.pt \\
-        --power 2 --eps 1e-5 -o out/person_explanation
+    yolo-lrp dog_bicycle_truck.jpg --classes truck --weights yolo26s.pt \\
+        --power 2 --eps 1e-5 -o out/truck_explanation
 """
 
 import argparse

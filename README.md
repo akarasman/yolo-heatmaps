@@ -6,7 +6,7 @@ Given a detector and an image, `YOLOLRP` explains *why* the model predicted a gi
 
 ## LRP heatmaps
 
-![image](https://github.com/akarasman/yolo-heatmaps/assets/56434833/db92eacd-b6d2-4b6f-86a2-cc3fe3d8fad8)
+![LRP explanation of a dog, bicycle, and truck](assets/dog_bicycle_truck_lrp.png)
 
 ## CRP heatmaps
 
@@ -37,7 +37,7 @@ Weights aren't bundled — the first `YOLO(...)` call downloads the requested ch
 ### Command line
 
 ```
-yolo-lrp riksi.jpg --classes person cat --contrastive
+yolo-lrp dog_bicycle_truck.jpg --classes dog bicycle truck --contrastive
 ```
 
 (Working from a checkout without installing? `python -m yolo_lrp.cli ...` works identically.)

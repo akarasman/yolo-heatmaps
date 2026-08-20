@@ -10,13 +10,11 @@ from ..lrp.protocols import SPPFHookLike
 
 def SPPF_fwd_hook(m: torch.nn.Module, in_tensor: Any, out_tensor: Any) -> None:
     """
-    Caches the max-pool indices for each of SPPF's `n` chained pooling
-    stages before they get overwritten - `m.m` is the same nn.MaxPool2d
-    instance called `n` times in a row on progressively pooled inputs, so
-    without this, torch's own forward hook on `m.m` would only ever retain
-    the last call's indices. (Not currently consumed by prop_SPPF's
-    additive-merge rule; kept for parity with the forward pass and in case
-    a future rule wants exact per-stage inversion.)
+    Caches per-stage max-pool indices for SPPF's `n` chained pooling
+    calls - `m.m` is the same MaxPool2d instance reused `n` times, so
+    torch's own hook on it would otherwise only keep the last call's
+    indices. Not currently consumed by prop_SPPF's additive-merge rule;
+    kept for parity and in case a future rule wants exact inversion.
 
     Arguments
     ---------
@@ -25,11 +23,10 @@ def SPPF_fwd_hook(m: torch.nn.Module, in_tensor: Any, out_tensor: Any) -> None:
         The SPPF module.
 
     in_tensor : Any
-        SPPF's input, as passed to the forward hook (a 1-tuple wrapping
-        the actual input tensor, per torch's forward hook convention).
+        SPPF's input (1-tuple wrapping the input tensor, per torch's hook convention).
 
     out_tensor : Any
-        SPPF's output (unused; hook signature required by torch).
+        Unused (required by torch's hook signature).
 
     Returns
     -------
@@ -58,9 +55,9 @@ def SPPF_fwd_hook(m: torch.nn.Module, in_tensor: Any, out_tensor: Any) -> None:
 
 def Concat_fwd_hook(m: torch.nn.Module, in_tensors: Any, out_tensor: Any) -> None:
     """
-    Caches the per-input channel widths (along Concat's own concat axis)
-    and the concatenated output shape, so prop_Concat can split relevance
-    back into the same slices later.
+    Caches per-input channel widths (along Concat's concat axis) and the
+    output shape, so prop_Concat can split relevance back into the same
+    slices later.
 
     Arguments
     ---------
@@ -69,8 +66,7 @@ def Concat_fwd_hook(m: torch.nn.Module, in_tensors: Any, out_tensor: Any) -> Non
         The Concat module.
 
     in_tensors : Any
-        Concat's input, as passed to the forward hook - a 1-tuple wrapping
-        the actual list of input tensors being concatenated.
+        Concat's input (1-tuple wrapping the list of tensors being concatenated).
 
     out_tensor : Any
         Concat's output.
@@ -87,12 +83,10 @@ def Concat_fwd_hook(m: torch.nn.Module, in_tensors: Any, out_tensor: Any) -> Non
     setattr(m, "out_shape", out_tensor.shape)
 
 
-# Maps YOLO26 block/module types to the forward hook that caches whatever
-# extra shape/index bookkeeping their prop_* function (see block_rules.py)
-# needs. Only entries whose default forward-hook behavior (or lack
-# thereof) isn't enough get one; everything else falls through to
-# DEFAULT_FWD_HOOKS (lrp.fwd_hooks - architecture-independent). Not meant
-# to be read directly; go through `select_fwd_hook`.
+# Maps YOLO26 block types to the hook that caches the extra shape/index
+# bookkeeping their prop_* function (block_rules.py) needs. Only entries
+# whose default hook behavior isn't enough get one; everything else falls
+# through to DEFAULT_FWD_HOOKS. Access via `select_fwd_hook`, not directly.
 FWD_HOOK_REGISTRY: Dict[Type[torch.nn.Module], FwdHookFunc] = {
     conv.Concat: Concat_fwd_hook,
     block.SPPF: SPPF_fwd_hook,
@@ -101,10 +95,9 @@ FWD_HOOK_REGISTRY: Dict[Type[torch.nn.Module], FwdHookFunc] = {
 
 def select_fwd_hook(mod: torch.nn.Module) -> Optional[FwdHookFunc]:
     """
-    Looks up which forward hook a given module needs - a block-specific
-    override (FWD_HOOK_REGISTRY) if it has one, else the primitive-level
-    default (lrp.fwd_hooks.DEFAULT_FWD_HOOKS) - hiding both dicts' shape
-    from callers.
+    Looks up the forward hook for a module: a block-specific override
+    (FWD_HOOK_REGISTRY) if one exists, else the primitive-level default
+    (lrp.fwd_hooks.DEFAULT_FWD_HOOKS).
 
     Arguments
     ---------

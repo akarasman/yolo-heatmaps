@@ -14,20 +14,17 @@ class RelevanceMessage:
     ----------
 
     from_ : int, optional
-        Registration number of the layer the relevance originated from, if
-        known. None where the origin isn't tracked by the caller.
+        Registration number of the originating layer, if known.
 
     to : int
-        Registration number of the layer this message is addressed to, or
-        a reserved negative sentinel (see `scale_key`) for "this layer's
-        own input" (the convention used throughout this package).
+        Registration number of the destination layer, or a reserved
+        negative sentinel (see `scale_key`) for "this layer's own input".
 
     relevance : torch.Tensor
-        The relevance payload itself, always a single tensor - YOLO's
-        per-detection-scale seed relevance is multiple messages (one per
-        scale, see `scale_key`), never one message holding a list, since
-        the scales have differing spatial shapes and can't be merged into
-        one tensor.
+        The relevance payload - always a single tensor, never a list.
+        YOLO's per-scale seed relevance is multiple messages (one per
+        scale, see `scale_key`) rather than one message holding a list,
+        since the scales have differing spatial shapes.
     """
 
     from_: Optional[int]
@@ -36,9 +33,8 @@ class RelevanceMessage:
 
     def __post_init__(self) -> None:
         """
-        Enforces the one real invariant this class exists to guarantee:
-        `relevance` is an actual tensor, never a list smuggled through
-        (see the class docstring for why that distinction matters).
+        Enforces that `relevance` is an actual tensor, never a list
+        smuggled through.
 
         Arguments
         ---------
@@ -62,13 +58,11 @@ def scale_key(scale: int) -> int:
     """
     Cache key for the seed relevance of one YOLO detection scale.
 
-    `-1` is reserved for "this layer's own input" everywhere else in this
-    package, but Detect's own input is really N separate feature maps (one
-    per detection scale) with differing spatial shapes that can't be
-    merged into a single message - so `_RelevanceInitializer` seeds one
-    message per scale under `scale_key(i)`, and `prop_Detect` reads them
-    back the same way, instead of either flattening the scales together or
-    smuggling a list through a single `to=-1` message.
+    `-1` is reserved elsewhere in this package for "this layer's own
+    input", but Detect's own input is really N feature maps (one per
+    scale) with differing spatial shapes that can't merge into a single
+    message - so each scale gets seeded under its own `scale_key(i)`,
+    read back the same way by `prop_Detect`.
 
     Arguments
     ---------
@@ -80,8 +74,8 @@ def scale_key(scale: int) -> int:
     -------
 
     int
-        Cache key for that scale's seed message, distinct from -1 and from
-        every real layer registration number (which are always >= 0).
+        Cache key for that scale, distinct from -1 and every real layer
+        registration number (always >= 0).
     """
 
     return -(scale + 2)
@@ -97,28 +91,26 @@ class LayerRelevance:
        `pop_cache`).
     3. Print its own state (`__str__`).
 
-    Internally, everything - including this layer's own relevance - is
-    just a `RelevanceMessage` in `cache`, keyed by `to` (`-1` for "this
-    layer's own input"). Not a `torch.Tensor` subclass: nothing outside
-    `scatter`/`gather` ever relied on tensor-like duck typing, and the
-    payload isn't even reliably a single tensor (see `RelevanceMessage`),
-    so the old inheritance was never an honest fit.
+    Internally everything - including this layer's own relevance - is a
+    `RelevanceMessage` in `cache`, keyed by `to` (`-1` for "this layer's
+    own input"). Not a `torch.Tensor` subclass: nothing relies on
+    tensor-like duck typing, and the payload isn't reliably a single
+    tensor anyway (see `RelevanceMessage`).
 
     Attributes
     ----------
 
     cache : Dict[int, RelevanceMessage]
-        Every currently-held relevance message, keyed by destination layer
-        (`-1` included, for this layer's own input).
+        Every currently-held message, keyed by destination layer (`-1`
+        included).
 
     contrastive : bool
         Whether this relevance represents contrastive (primal vs. dual)
         propagation. Purely descriptive - concatenating primal/dual
-        batches, if needed, is the caller's responsibility (see
-        `_RelevanceInitializer`).
+        batches is the caller's responsibility.
 
     print_decimals : int
-        Amount of decimals to use in printing.
+        Decimals used when printing.
     """
 
     def __init__(
@@ -127,9 +119,7 @@ class LayerRelevance:
         print_decimals: int = 5,
     ) -> None:
         """
-        Starts empty. Seed initial relevance with `gather()` - there's no
-        separate construction-time shortcut, so there's exactly one way
-        relevance ever enters a LayerRelevance.
+        Starts empty - relevance only ever enters via `gather()`.
 
         Arguments
         ---------
@@ -152,13 +142,11 @@ class LayerRelevance:
 
     def gather(self, *messages: RelevanceMessage) -> None:
         """
-        Gather incoming relevance messages into the cache. Every target
-        accumulates: if this layer already has relevance cached for a
-        message's `to`, the new message's relevance is added to it rather
-        than replacing it, since any target can receive contributions
-        from several upstream paths (e.g. a Concat feeding two branches,
-        or two branches both eventually routing relevance back to the
-        same earlier layer) before it's consumed.
+        Gathers incoming relevance messages into the cache. If this layer
+        already has relevance cached for a message's `to`, the new
+        relevance is added to it rather than replacing it - a target can
+        receive contributions from several upstream paths (e.g. a Concat
+        feeding two branches) before it's consumed.
 
         Arguments
         ---------
@@ -177,20 +165,16 @@ class LayerRelevance:
         RuntimeError
             If a message's relevance can't be added to what's already
             cached for its `to` (almost always a shape mismatch between
-            two upstream contributions that should have lined up).
-            Re-raised with the target and both shapes, since the bare
-            torch error alone gives no indication which layer or messages
-            were involved.
+            two upstream contributions). Re-raised with target and both
+            shapes for context.
         """
 
         for message in messages:
 
-            # Add to cache if nothing's there yet for this target
             if message.to not in self.cache:
                 self.cache[message.to] = message
                 continue
 
-            # Accumulate to existing cache entry for this target
             existing = self.cache[message.to].relevance
             try:
                 accumulated = existing + message.relevance
@@ -206,15 +190,14 @@ class LayerRelevance:
 
     def scatter(self, which: Optional[int] = None, destroy: bool = True) -> Any:
         """
-        Scatter cached relevance back out.
+        Scatters cached relevance back out.
 
         Arguments
         ---------
 
         which : int, optional
             Destination layer to scatter relevance for (`-1` for this
-            layer's own input). If None, every cached message is
-            returned.
+            layer's own input). None returns every cached message.
 
         destroy : bool
             Whether to remove the scattered message(s) from the cache
@@ -224,10 +207,9 @@ class LayerRelevance:
         -------
 
         RelevanceMessage.relevance payload
-            When `which` is given: the raw relevance payload cached for
-            that target (an empty tensor if `which=-1` and nothing has
-            been gathered for it yet - a layer legitimately having no
-            own-input relevance is a normal state, not a bug).
+            When `which` is given: the raw payload cached for that target
+            (an empty tensor if `which=-1` and nothing's been gathered
+            for it yet - a normal state, not a bug).
 
         List[RelevanceMessage]
             When `which` is None: every currently cached message.
@@ -237,11 +219,10 @@ class LayerRelevance:
 
         KeyError
             If `which` is given, isn't -1, and nothing is cached for it.
-            Unlike -1, every other key (a real layer registration number,
-            or a `scale_key(i)` seed slot) should always have been
-            gathered by the time anything asks for it - silently handing
-            back zeros here would turn a real bug (e.g. an off-by-one in
-            scale indexing) into a heatmap that's just quietly wrong.
+            Unlike -1, every other key (a real layer registration number
+            or a `scale_key(i)` slot) should always have been gathered by
+            the time it's requested - silently returning zeros here would
+            turn a real bug into a heatmap that's just quietly wrong.
         """
 
         if which is None:
@@ -268,7 +249,7 @@ class LayerRelevance:
 
     def pop_cache(self, rev_idx: int) -> None:
         """
-        Move relevance cached for a specific layer into this layer's own
+        Moves relevance cached for a specific layer into this layer's own
         (`-1`) relevance, accumulating with whatever's already there.
         No-op if nothing is cached for `rev_idx`.
 
@@ -309,8 +290,8 @@ class LayerRelevance:
         """
 
         def value(message: Optional[RelevanceMessage]) -> Any:
-            """Sums a message's relevance - a (primal, dual) pair if
-            contrastive, a single float otherwise. Absent -> zero."""
+            """Sums a message's relevance - (primal, dual) if contrastive,
+            a single float otherwise. Absent -> zero."""
             if message is None:
                 return (0.0, 0.0) if self.contrastive else 0.0
             r = message.relevance
@@ -322,8 +303,7 @@ class LayerRelevance:
 
         def fraction(v: Any) -> Any:
             """Expresses a value() result as a fraction of `total`,
-            rounded to print_decimals; zero if there's no total to divide by.
-            """
+            rounded to print_decimals; zero if there's no total."""
             if self.contrastive:
                 p, d = v
                 p = round(p / total, self.print_decimals) if total else 0.0

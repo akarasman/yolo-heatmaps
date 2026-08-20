@@ -113,6 +113,7 @@ mypy .
 - **Attention** (`C2PSA`, and the `attn=True` branch of `C3k2`) has a genuine relevance rule, not an identity placeholder — a from-scratch implementation in the spirit of [AttnLRP](https://proceedings.mlr.press/v235/achtibat24a.html) (Achtibat et al., 2024): a bilinear split for the two matrix products in self-attention (`Q·Kᵀ`, `attention·V`), and a dedicated softmax rule derived from its own Jacobian, rather than treating attention as opaque. It's a principled derivation done for this project, not a verified reproduction of the paper's exact published rules.
 - BatchNorm is treated as transparent to relevance throughout (a standard LRP-for-CNNs simplification), not explicitly decomposed.
 - Contrastive (CRP) relevance intentionally isn't globally conserved the way plain LRP roughly is — the dual (primal + "everything else") path expands the relevance total as it flows backward, which is expected, not a bug.
+- Relevance seeding (`YOLOLRP.explain`/`_initialize_relevance`) follows this repo's own paper (cited below) with two exceptions: object-confidence weighting (eq. 8) isn't implemented, since modern YOLO heads (v8+) have no separate objectness score to weight by; and `seed_strategy`/`seed_dilate`/a confidence floor under max-class selection are extra levers the paper doesn't have, added to handle cases outside its original scope.
 
 If you are planning to utilize this repo in your research kindly cite the following work:
 

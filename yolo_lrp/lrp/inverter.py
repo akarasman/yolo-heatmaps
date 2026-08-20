@@ -20,33 +20,23 @@ from .rules import RULE_REGISTRY, ConvRule, LinearRule, PropRule
 
 logger = logging.getLogger(__name__)
 
-# What actually flows through invert()/__call__: a LayerRelevance at a
-# top-level module_list entry, a plain Tensor once a TopLevelPropFunc has
-# scattered it (see block_rules.py's own TopLevelPropFunc/NestedPropFunc
-# split for the full reasoning) - both real, both live, never just Tensor
-# alone despite Inverter's own earlier signature having claimed that.
+# What flows through invert(): a LayerRelevance at a top-level module_list
+# entry, or a plain Tensor once a TopLevelPropFunc has scattered it (see
+# block_rules.py's TopLevelPropFunc/NestedPropFunc split).
 RelevanceLike = Union[LayerRelevance, torch.Tensor]
 
-# invert()/__call__ are type-preserving, not just "accepts either, returns
-# either" - passing a Tensor always gets a Tensor back, passing a
-# LayerRelevance always gets a LayerRelevance back (every dispatch path,
-# PropRule.propagate()/prop_* functions alike, follows this). A
-# constrained TypeVar (rather than the plain RelevanceLike Union) lets
-# mypy carry that correlation through every call site, instead of forcing
-# a cast back to the specific type at every single one.
+# Constrained TypeVar so invert()/__call__ are type-preserving (Tensor in
+# -> Tensor out, LayerRelevance in -> LayerRelevance out) without a cast
+# at every call site.
 RelevanceT = TypeVar("RelevanceT", LayerRelevance, torch.Tensor)
 
-# inv_funcs' real value type is block_rules.PropFunc, but inverter.py
-# can't import block_rules (block_rules imports Inverter under
-# TYPE_CHECKING; the reverse import at runtime would be circular - see
-# block_rules.py's own note on this). Callable[..., RelevanceLike] is the
-# loosest honest description from this side: something invoked as
-# `f(self, layer, relevance, **kwargs)` returning relevance-shaped data.
+# inv_funcs' real value type is block_rules.PropFunc, but that can't be
+# imported here (circular import - see block_rules.py). Callable[...,
+# RelevanceLike] is the loosest honest type from this side.
 InvFunc = Callable[..., RelevanceLike]
 
-# Layer types whose backward pass is genuinely the identity (f(x) = x),
-# so `invert()` returns relevance unchanged rather than consulting either
-# dispatch table.
+# Layer types whose backward pass is the identity (f(x) = x) - invert()
+# returns relevance unchanged for these rather than consulting a table.
 IDENTITY_MAPPINGS = (
     torch.nn.BatchNorm1d,
     torch.nn.BatchNorm2d,
@@ -62,55 +52,44 @@ IDENTITY_MAPPINGS = (
     torch.nn.LogSoftmax,
     torch.nn.Sigmoid,
     torch.nn.SiLU,
-    # torch.nn.Identity is genuinely identity (f(x) = x). It's what
-    # YOLO26's Detect.dfl becomes under the default reg_max=1 ("DFL
-    # removal").
-    torch.nn.Identity,
+    torch.nn.Identity,  # what YOLO26's Detect.dfl becomes under default reg_max=1 ("DFL removal")
 )
 
 
 class Inverter:
     """
-    Owns the two real per-layer-type backward-dispatch tables and the
-    single `invert()` method that consults them: `rules_by_layer_type`
-    for primitive layers (Conv/Linear/MaxPool/Upsample, via `PropRule`
-    instances - see rules.py) and `inv_funcs` for composite YOLO blocks
-    (C3/C2f/SPPF/..., via prop_* functions - see block_rules.py). Forward-
-    hook bookkeeping is a separate concern owned by fwd_hooks.py/YOLOLRP,
-    not by this class - Inverter only ever computes backward relevance.
+    Owns two per-layer-type backward-dispatch tables and the `invert()`
+    method that consults them: `rules_by_layer_type` for primitive layers
+    (Conv/Linear/MaxPool/Upsample, via `PropRule` - see rules.py) and
+    `inv_funcs` for composite YOLO blocks (C3/C2f/SPPF/..., via prop_*
+    functions - see block_rules.py). Forward-hook bookkeeping lives in
+    fwd_hooks.py/YOLOLRP instead - this class only computes backward
+    relevance.
 
     Attributes
     ----------
 
     linear_rule : LinearRule
-        Propagation rule to use for linear layers
+        Propagation rule for linear layers.
 
     conv_rule : ConvRule
-        Propagation rule for convolutional layers
+        Propagation rule for convolutional layers.
 
     rules_by_layer_type : Dict[Type[torch.nn.Module], PropRule]
-        Backward dispatch table for primitive layers, keyed directly by
-        torch layer type (resolved once, in __init__, from
-        RULE_REGISTRY's type -> PropRule-subclass mapping).
+        Backward dispatch table for primitive layers, resolved once in
+        __init__ from RULE_REGISTRY.
 
     inv_funcs : Dict[Type[torch.nn.Module], InvFunc]
-        Backward dispatch table for composite YOLO blocks, keyed by exact
-        module type. Populated externally via `register_inv_func`
-        (YOLOLRP does this from `block_rules.PROP_REGISTRY` or an
-        injected equivalent).
+        Backward dispatch table for composite YOLO blocks, populated
+        externally via `register_inv_func`.
 
     pass_not_implemented : bool
-        Return relevance unchanged for a layer type neither dispatch
-        table (nor any of `invert`'s other special cases) covers, instead
-        of raising.
+        Return relevance unchanged for an unhandled layer type instead of
+        raising.
 
     prop_to : List[int]
-        Layer indices Detect's cv3 heads propagate relevance back to -
-        not set here (Inverter has no notion of "Detect" at all); bolted
-        on externally by `YOLOLRP.__init__` and read by
-        `block_rules.prop_Detect`. Declared here, defaulting to empty,
-        purely so it's a real attribute rather than an ad hoc one mypy
-        (and readers) can't see coming.
+        Layer indices Detect's cv3 heads propagate relevance back to - set
+        externally by YOLOLRP, read by `block_rules.prop_Detect`.
     """
 
     def __init__(
@@ -120,20 +99,19 @@ class Inverter:
         pass_not_implemented: bool = False,
     ) -> None:
         """
+        Resolves `rules_by_layer_type` from RULE_REGISTRY, keyed to the
+        given conv/linear rule instances where those are needed.
+
         Arguments
         ---------
 
         linear_rule : PropRule, optional
-            Configured rule instance for Linear layers. See class
-            docstring. If omitted, Linear layers are simply left out of
-            `rules_by_layer_type` (not silently given a default instance -
-            unlike MaxPool/Upsample, Conv/Linear rules carry meaningful
-            per-model configuration, so an omission here is assumed
-            deliberate).
+            Rule instance for Linear layers. Omitted means Linear layers
+            are simply left out of `rules_by_layer_type`, not defaulted.
 
         conv_rule : PropRule, optional
-            Configured rule instance for Conv1d/2d/3d layers. See
-            `linear_rule` above; same omission behavior.
+            Rule instance for Conv1d/2d/3d layers. Same omission behavior
+            as `linear_rule`.
 
         pass_not_implemented : bool
             See class docstring.
@@ -148,19 +126,12 @@ class Inverter:
         self.conv_rule = conv_rule
         self.prop_to: List[int] = []
 
-        # RULE_REGISTRY maps torch layer type -> PropRule *subclass*
-        # (e.g. {Conv2d: ConvRule, MaxPool2d: MaxPoolRule, ...}), since
-        # which *kind* of rule applies to a layer never changes. Which
-        # *instance* to use does, for ConvRule/LinearRule specifically -
-        # conv_rule/linear_rule carry per-model configuration
-        # (power/eps/positive/contrastive) supplied by the caller (same
-        # objects, not copies, so mutating e.g. self.conv_rule.contrastive
-        # afterwards is still reflected here). Every other rule class in
-        # RULE_REGISTRY (MaxPoolRule, UpsampleRule, ...) needs no such
-        # configuration, so it gets exactly one shared default instance.
-        # Resolved down to a flat layer-type -> instance dict once, here,
-        # rather than re-resolving subclass -> instance on every single
-        # invert() call.
+        # RULE_REGISTRY maps layer type -> PropRule subclass. ConvRule/
+        # LinearRule need the caller's configured instance (kept, not
+        # copied, so later mutation e.g. self.conv_rule.contrastive still
+        # applies); every other rule class gets one shared default
+        # instance. Resolved to a flat type -> instance dict once here
+        # rather than on every invert() call.
         instances_by_class: Dict[Type[PropRule], PropRule] = {}
         for rule in (conv_rule, linear_rule):
             if rule is not None:
@@ -194,9 +165,8 @@ class Inverter:
             Module type to register `inv_func` against.
 
         inv_func : InvFunc
-            Function computing that type's backward relevance
-            propagation (see block_rules.PropFunc, the more precisely-
-            shaped type actual prop_* functions are declared with).
+            Function computing that type's backward relevance propagation
+            (see block_rules.PropFunc for the precise shape).
 
         Returns
         -------
@@ -213,11 +183,10 @@ class Inverter:
         self, layer: torch.nn.Module, relevance: RelevanceT, **kwargs: Any
     ) -> RelevanceT:
         """
-        Computes the backward pass for the incoming relevance for the
-        specified layer, trying (in order): the primitive-layer dispatch
-        table, the composite-block dispatch table, then a handful of
-        special cases neither table needs to know about (Sequential
-        recursion, genuinely-identity layer types).
+        Computes the backward pass through `layer` for `relevance`, trying
+        in order: the primitive-layer dispatch table, the composite-block
+        dispatch table, then special cases neither table covers
+        (Sequential recursion, identity layer types).
 
         Arguments
         ---------
@@ -226,17 +195,14 @@ class Inverter:
             Layer to propagate relevance through.
 
         relevance : LayerRelevance or torch.Tensor
-            Incoming relevance from higher up in the network - a
-            LayerRelevance at a top-level module_list entry, a plain
-            Tensor once a TopLevelPropFunc has scattered it (see
-            block_rules.py's TopLevelPropFunc/NestedPropFunc split).
+            Incoming relevance from higher up in the network.
 
         Returns
         -------
 
         LayerRelevance or torch.Tensor
-            Redistributed relevance going to the lower layers in the
-            network, in whichever of the two shapes it came in as.
+            Redistributed relevance for the lower layers, in whichever
+            shape it came in as.
 
         Raises
         ------
@@ -251,19 +217,17 @@ class Inverter:
             return rule(layer, relevance, **kwargs)
 
         if type(layer) in self.inv_funcs:
-            # InvFunc can't express "returns whatever type it was given"
-            # (that's block_rules.PropFunc's job, which this module can't
-            # import - see InvFunc's own note) - this cast asserts the
-            # same type-preserving contract invert() documents everywhere
-            # else, for this one dynamic dispatch path.
+            # InvFunc can't express "returns the type it was given" - this
+            # cast asserts the same type-preserving contract documented on
+            # invert() itself.
             return cast(
                 RelevanceT,
                 self.inv_funcs[type(layer)](self, layer, relevance, **kwargs),
             )
 
         if isinstance(layer, torch.nn.modules.container.Sequential):
-            # torch's own Sequential.__getitem__ stub doesn't resolve the
-            # slice overload as iterable - it really is one at runtime.
+            # Sequential's __getitem__ stub doesn't type slices as
+            # iterable - it is one at runtime.
             reversed_layers = cast(Iterable[torch.nn.Module], layer[::-1])
             for sub_layer in reversed_layers:
                 relevance = self.invert(sub_layer, relevance)
@@ -282,5 +246,23 @@ class Inverter:
     def __call__(
         self, layer: torch.nn.Module, relevance: RelevanceT, **kwargs: Any
     ) -> RelevanceT:
-        """Wrapper for invert method"""
+        """
+        Alias for `invert`.
+
+        Arguments
+        ---------
+
+        layer : torch.nn.Module
+            Layer to propagate relevance through.
+
+        relevance : LayerRelevance or torch.Tensor
+            Incoming relevance.
+
+        Returns
+        -------
+
+        LayerRelevance or torch.Tensor
+            Redistributed relevance, in whichever shape it came in as.
+        """
+
         return self.invert(layer, relevance, **kwargs)

@@ -3,11 +3,10 @@ import torch
 
 def get_dummy_summation_conv_layer(out_channels: int) -> torch.nn.Conv2d:
     """
-    Builds a fixed-weight 1x1 Conv2d that reproduces `a + b` from
-    `cat(a, b)` along the channel dimension - used throughout
-    block_rules.py to split relevance for a residual/branch addition via
-    ConvRule's own LRP rule (see `_split_additive_relevance`), instead of
-    a hand-rolled ratio.
+    Builds a fixed-weight 1x1 Conv2d reproducing `a + b` from `cat(a, b)`
+    along the channel dim - lets block_rules.py split relevance for a
+    residual/branch addition via ConvRule's own LRP rule (see
+    `_split_additive_relevance`) instead of a hand-rolled ratio.
 
     Arguments
     ---------

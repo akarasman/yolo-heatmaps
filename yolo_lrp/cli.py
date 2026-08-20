@@ -4,9 +4,8 @@ CLI for generating LRP/CRP relevance heatmaps from a YOLO model, for one
 or more requested classes, on a single input image.
 
 Installed as the `yolo-lrp` console script (see pyproject.toml's
-[project.scripts]); also runnable in a repo checkout without installing,
-via the thin `explain.py` shim at the repo root, or `python -m
-yolo_lrp.cli`.
+[project.scripts]); also runnable in a checkout without installing via
+`python -m yolo_lrp.cli`.
 
 Example
 -------
@@ -29,6 +28,7 @@ import torchvision
 from PIL import Image
 from ultralytics import YOLO
 
+from .lrp.viz import gaussian_blur_2d, overlay_heatmaps
 from .yolo.explainer import YOLOLRP
 
 
@@ -151,6 +151,21 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Zero out the top 2%% of relevance values before saving.",
     )
+    explain.add_argument(
+        "--localize-bbox",
+        action="store_true",
+        help="Gate relevance to the class's own post-NMS bounding box "
+        "before propagation. No-op for a class not detected in the "
+        "image (logged, not an error).",
+    )
+    explain.add_argument(
+        "--debug-layers",
+        action="store_true",
+        help="Also save one heatmap per network layer (upsampled and "
+        "overlaid on the input, at each layer's own resolution) to a "
+        "'debug/' subdirectory per class - for investigating where a "
+        "strange final heatmap actually comes from.",
+    )
 
     output = parser.add_argument_group("output")
     output.add_argument(
@@ -165,8 +180,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--cmap",
         default=None,
         help="Matplotlib colormap for the heatmap PNGs. Defaults to "
-        "'seismic' with --contrastive (relevance can be negative), "
-        "'Reds' otherwise.",
+        "'seismic' - a diverging map, since relevance can be negative "
+        "even outside --contrastive (any model with an attention block: "
+        "YOLO26/YOLOv10/YOLO11).",
     )
 
     return parser.parse_args(argv)
@@ -250,11 +266,15 @@ def default_output_dir(image_path: Path) -> Path:
     return Path(f"{image_path.stem}_{stamp}")
 
 
-def save_heatmap(
-    relevance: torch.Tensor, path: Path, cmap: str, symmetric: bool
-) -> None:
+def save_heatmap(relevance: torch.Tensor, path: Path, cmap: str) -> None:
     """
-    Renders a single relevance heatmap to a PNG file.
+    Renders a single relevance heatmap to a PNG file, lightly blurred for
+    display (see `gaussian_blur_2d`; doesn't touch the values). Centers
+    the color scale on zero if the data has any real negative value,
+    not based on `--contrastive` - plain LRP can also produce negative
+    relevance for any model with an attention block (YOLO26/YOLOv10/
+    YOLO11's C2PSA/PSA), since AttnLRP's rules aren't sign-preserving
+    the way the rest are.
 
     Arguments
     ---------
@@ -266,11 +286,9 @@ def save_heatmap(
         File to write the PNG to.
 
     cmap : str
-        Matplotlib colormap name.
-
-    symmetric : bool
-        Whether to center the color scale on zero (for contrastive
-        relevance, which can be negative) instead of starting at zero.
+        Matplotlib colormap name. Should be a diverging map (e.g. the
+        default `seismic`) unless the caller has confirmed this
+        relevance can never be negative.
 
     Returns
     -------
@@ -278,8 +296,9 @@ def save_heatmap(
         None
     """
 
-    array = relevance.detach().cpu().numpy()
+    array = gaussian_blur_2d(relevance)
     max_abs = float(np.abs(array).max())
+    symmetric = bool((array < 0).any())
 
     fig, ax = plt.subplots(figsize=(6, 6))
     if symmetric:
@@ -291,6 +310,110 @@ def save_heatmap(
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
+
+
+def save_layer_debug(
+    image: torch.Tensor, relevance: torch.Tensor, path: Path, cmap: str = "seismic"
+) -> bool:
+    """
+    Renders one layer's own-input relevance snapshot (at that layer's own,
+    usually much smaller, resolution), upsampled and overlaid on the
+    input image via `overlay_heatmaps`, for `--debug-layers`.
+
+    Arguments
+    ---------
+
+    image : torch.Tensor
+        The (3, H, W) input image being explained.
+
+    relevance : torch.Tensor
+        A single layer's relevance snapshot, as returned by
+        `YOLOLRP.get_layer_relevance` - shape (B, C, h, w), B possibly
+        doubled under contrastive relevance. May be empty - not every
+        layer has gathered its own-input relevance yet at snapshot time.
+
+    path : Path
+        File to write the PNG to.
+
+    cmap : str
+        Matplotlib colormap. Diverging by default - see `save_heatmap`
+        for why relevance can be signed outside contrastive mode too.
+
+    Returns
+    -------
+
+    bool
+        Whether a file was actually written - False if `relevance` was
+        empty (e.g. Detect, the first layer inverted).
+    """
+
+    if relevance.numel() == 0:
+        return False
+
+    # Primal only (index 0) even under contrastive - dual would double
+    # every debug image for little insight.
+    layer_map = relevance[0].sum(dim=0, keepdim=True).unsqueeze(0)
+    upsampled = torch.nn.functional.interpolate(
+        layer_map, size=image.shape[-2:], mode="nearest"
+    )[0, 0]
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    overlay_heatmaps(ax, image, [(upsampled, cmap, None)])
+    ax.set_xticks([])
+    ax.set_yticks([])
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return True
+
+
+def _save_layer_debug_images(
+    explainer: YOLOLRP, image: torch.Tensor, debug_dir: Path, cmap: str
+) -> None:
+    """
+    Saves one `save_layer_debug` image per entry in
+    `explainer.get_layer_relevance()` into `debug_dir`, numbered in
+    propagation order - 0 is the output end (Detect), the last number is
+    the network's own input.
+
+    Arguments
+    ---------
+
+    explainer : YOLOLRP
+        The explainer that was just run with `save_r_values=True`.
+
+    image : torch.Tensor
+        The (3, H, W) input image being explained.
+
+    debug_dir : Path
+        Directory to write the numbered PNGs into (created if needed).
+
+    cmap : str
+        Matplotlib colormap, forwarded to `save_layer_debug`.
+
+    Returns
+    -------
+
+        None
+    """
+
+    r_values = explainer.get_layer_relevance()
+    if not r_values:
+        return
+
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    saved = 0
+    for i, (layer, relevance) in enumerate(r_values):
+        if layer is None:
+            name = "input"
+        else:
+            reg_num = getattr(layer, "reg_num", "?")
+            name = f"{type(layer).__name__}_{reg_num}"
+        path = debug_dir / f"{i:03d}_{name}.png"
+        if save_layer_debug(image, relevance, path, cmap=cmap):
+            saved += 1
+
+    print(f"[debug] {saved}/{len(r_values)} layer heatmaps saved to {debug_dir}")
 
 
 def explain_class(
@@ -305,6 +428,8 @@ def explain_class(
     primal_intensity: float,
     dual_intensity: float,
     suppress_outliers: bool,
+    debug_layers: bool,
+    localize_bbox: bool,
 ) -> None:
     """
     Generates one relevance heatmap for a single requested class and
@@ -346,6 +471,15 @@ def explain_class(
     suppress_outliers : bool
         Whether to zero out the top 2% of relevance values before saving.
 
+    debug_layers : bool
+        Also save one upsampled, overlaid heatmap per network layer to
+        `output_dir/debug/<label>/` (see `save_layer_debug`); sets
+        `explainer.save_r_values` for the duration of this call.
+
+    localize_bbox : bool
+        Gate relevance to the class's own post-NMS bounding box before
+        propagation - see `YOLOLRP.explain`.
+
     Returns
     -------
 
@@ -353,6 +487,7 @@ def explain_class(
     """
 
     cls = resolve_class(raw_cls) if raw_cls is not None else None
+    explainer.save_r_values = debug_layers
 
     heatmap = explainer.explain(
         image,
@@ -361,6 +496,7 @@ def explain_class(
         max_class_only=max_class_only,
         primal_intensity=primal_intensity,
         dual_intensity=dual_intensity,
+        localize_bbox=localize_bbox,
     )
     if suppress_outliers:
         heatmap = explainer._suppress_outliers(heatmap)
@@ -369,13 +505,13 @@ def explain_class(
     safe_label = label.replace("/", "_").replace(" ", "_")
 
     np.save(output_dir / f"{safe_label}.npy", heatmap.detach().cpu().numpy())
-    save_heatmap(
-        heatmap,
-        output_dir / f"{safe_label}.png",
-        cmap=cmap,
-        symmetric=contrastive,
-    )
+    save_heatmap(heatmap, output_dir / f"{safe_label}.png", cmap=cmap)
     print(f"[{label}] heatmap saved to {output_dir / f'{safe_label}.png'}")
+
+    if debug_layers:
+        _save_layer_debug_images(
+            explainer, image, output_dir / "debug" / safe_label, cmap
+        )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -418,7 +554,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     output_dir = args.output or default_output_dir(args.image)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    cmap = args.cmap or ("seismic" if args.contrastive else "Reds")
+    # seismic (diverging), not Reds: relevance can be negative even
+    # outside --contrastive - see save_heatmap.
+    cmap = args.cmap or "seismic"
     torchvision.utils.save_image(image, output_dir / "input.png")
 
     requested = args.classes if args.classes is not None else [None]
@@ -434,6 +572,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             primal_intensity=args.primal_intensity,
             dual_intensity=args.dual_intensity,
             suppress_outliers=args.suppress_outliers,
+            debug_layers=args.debug_layers,
+            localize_bbox=args.localize_bbox,
         )
 
     print(f"Done. Output written to {output_dir}")

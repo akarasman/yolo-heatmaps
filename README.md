@@ -8,10 +8,6 @@ Given a detector and an image, `YOLOLRP` explains *why* the model predicted a gi
 
 ![LRP explanation of a dog, bicycle, and truck](assets/dog_bicycle_truck_lrp.png)
 
-## CRP heatmaps
-
-![image](https://github.com/akarasman/yolo-heatmaps/assets/56434833/140e8e6a-e589-450f-8c09-6b05f94fbeeb)
-
 ## Installation
 
 Install straight from a checkout:

@@ -52,7 +52,7 @@ IDENTITY_MAPPINGS = (
     torch.nn.LogSoftmax,
     torch.nn.Sigmoid,
     torch.nn.SiLU,
-    torch.nn.Identity,  # what YOLO26's Detect.dfl becomes under default reg_max=1 ("DFL removal")
+    torch.nn.Identity,  # YOLO26's Detect.dfl under default reg_max=1 ("DFL removal")
 )
 
 

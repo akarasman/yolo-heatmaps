@@ -520,7 +520,9 @@ class YOLOLRP:
             bbox,
         )
 
-    def _get_cls_preds(self, frame: torch.Tensor) -> Tuple[List[torch.Tensor], torch.Tensor]:
+    def _get_cls_preds(
+        self, frame: torch.Tensor
+    ) -> Tuple[List[torch.Tensor], torch.Tensor]:
         """
         Runs the model forward, returning per-scale classification
         confidences plus this frame's post-NMS detections (for
@@ -567,7 +569,9 @@ class YOLOLRP:
         cls_preds = [cv3_branch[-1].out_tensor.sigmoid() for cv3_branch in cv3]
 
         is_end2end = raw_preds.shape[-1] == 6
-        detections = non_max_suppression(raw_preds, conf_thres=0.25, end2end=is_end2end)[0]
+        detections = non_max_suppression(
+            raw_preds, conf_thres=0.25, end2end=is_end2end
+        )[0]
         return cls_preds, detections
 
     def _resolve_bbox(
@@ -986,8 +990,12 @@ def _localize_to_bbox(
     stride_x = image_size[1] / w
     x1, y1, x2, y2 = bbox
 
-    ys = (torch.arange(h, dtype=cls_pred.dtype, device=cls_pred.device) + 0.5) * stride_y
-    xs = (torch.arange(w, dtype=cls_pred.dtype, device=cls_pred.device) + 0.5) * stride_x
+    ys = (
+        torch.arange(h, dtype=cls_pred.dtype, device=cls_pred.device) + 0.5
+    ) * stride_y
+    xs = (
+        torch.arange(w, dtype=cls_pred.dtype, device=cls_pred.device) + 0.5
+    ) * stride_x
     inside = ((ys >= y1) & (ys <= y2))[:, None] & ((xs >= x1) & (xs <= x2))[None, :]
 
     return cls_pred * inside.to(cls_pred.dtype)

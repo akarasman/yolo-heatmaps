@@ -118,9 +118,10 @@ def test_second_best_class_surfaces_the_runner_up_even_when_cls_is_the_winner():
     dual = _second_best_class(cls_pred, cls=0)
 
     assert dual.sum().item() > 0.0
-    assert dual[0, 1, 0, 0].item() == 0.30000001192092896 or abs(
-        dual[0, 1, 0, 0].item() - 0.3
-    ) < 1e-6
+    assert (
+        dual[0, 1, 0, 0].item() == 0.30000001192092896
+        or abs(dual[0, 1, 0, 0].item() - 0.3) < 1e-6
+    )
 
 
 def test_initialize_relevance_contrastive_keeps_the_runner_up_at_the_winning_location():
